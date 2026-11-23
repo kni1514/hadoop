@@ -874,6 +874,19 @@ undefined
       }
     }
 
+    if (act === 'pig' && (args[0] === '-e' || args[0] === '-execute')) {
+      const script = cmd.raw.trim().replace(/^pig\s+-e(?:xecute)?\s+/i, '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2');
+      if (!script) return 'Usage: pig -e "a = LOAD \'file.csv\' USING PigStorage(\',\'); DUMP a;"';
+      return `__PIG_EXEC__:${script}`;
+    }
+
+    if (act === 'pig' && args[0] === '-f') {
+      if (!args[1]) return 'Usage: pig -f script.pig';
+      const content = this.getLocalFileContent(this.resolveLocalPath(args[1]));
+      if (content === undefined) return `ERROR: Pig script file '${args[1]}' does not exist.`;
+      return `__PIG_EXEC__:${content}`;
+    }
+
     if (act === 'hive' || act === 'pig') {
       return '__LAUNCH_KSQL__';
     }
@@ -2314,7 +2327,8 @@ Hadoop Ecosystem Commands:
   hive --service llap                  Start Hive LLAP In-Memory Query Accelerator
   impala-shell -q "SELECT ..."         Execute Impala MPP SQL query
   presto --execute "SELECT ..."        Execute Presto/Trino SQL query
-  pig -e "LOAD ... DUMP ..."           Execute Apache Pig Latin script
+  pig -e "LOAD ... DUMP ..."           Execute Apache Pig Latin statements
+  pig -f script.pig                    Run a Pig Latin script file
   phoenix-sqlline -e "SELECT ..."      Execute Apache Phoenix SQL over HBase
   nifi.sh start                        Start Apache NiFi Flow Engine
   zeppelin-daemon.sh start             Start Apache Zeppelin notebook server

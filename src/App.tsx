@@ -1,7 +1,6 @@
 import React, { useState, useEffect, Component, ReactNode } from 'react';
 import { FullTerminalView } from './ui/FullTerminalView';
 import { SimulatorBackend } from './core/backend/hadoopBackend';
-import { PWABanner } from './ui/PWABanner';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -51,7 +50,6 @@ export const App: React.FC = () => {
     <ErrorBoundary>
       <div className="w-screen h-screen bg-black text-white overflow-hidden font-mono">
         <FullTerminalView backend={backend} />
-        <PWABanner />
       </div>
     </ErrorBoundary>
   );

@@ -14,8 +14,8 @@ describe('Presto/Trino SQL, Apache Pig & YARN RMAdmin Test', () => {
   it('should execute Apache Pig Latin scripts', () => {
     const backend = new SimulatorBackend();
     const pigOut = backend.executeCLI('pig -e "sales = LOAD \'/sales.csv\'; DUMP sales;"');
-    expect(pigOut).toContain('Pig Latin Engine');
-    expect(pigOut).toContain('Pig Job Complete');
+    // The shell hands the Pig Latin script to the in-browser Pig/SQLite engine.
+    expect(pigOut).toBe("__PIG_EXEC__:sales = LOAD '/sales.csv'; DUMP sales;");
   });
 
   it('should support yarn rmadmin -refreshNodes', () => {

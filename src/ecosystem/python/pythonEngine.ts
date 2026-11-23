@@ -335,7 +335,9 @@ sc = spark.sparkContext
 
         if ((window as any).loadPyodide) {
           this.pyodide = await (window as any).loadPyodide({
-            indexURL: './pyodide/'
+            indexURL: './pyodide/',
+            // Keep package downloads local too (pyodide's default is a CDN).
+            packageBaseUrl: './pyodide/'
           });
           (window as any).pyodide = this.pyodide;
         }

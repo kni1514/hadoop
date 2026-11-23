@@ -474,6 +474,22 @@ export const FullTerminalView: React.FC<FullTerminalViewProps> = ({ backend }) =
       const activeDirAfter = backend.getWorkingDir();
       setCurrentDir(activeDirAfter);
 
+      if (typeof output === 'string' && output.startsWith('__PIG_EXEC__:')) {
+        const script = output.slice('__PIG_EXEC__:'.length);
+        await ksqlEngineRef.current.init();
+        const res = await ksqlEngineRef.current.executeCommand(script);
+        const header = 'Apache Pig Latin Engine (local mode, SQLite WebAssembly)';
+        const footer = res.isError ? 'Pig Job Failed!' : 'Pig Job Complete - Success!';
+        setLines((prev) => [
+          ...prev,
+          { id: `cmd_${Date.now()}`, type: 'prompt', workingDir: activeDirBefore, command: trimmed, content: '' },
+          { id: `pig_o_${Date.now()}`, type: res.isError ? 'error' : 'output', content: `${header}\n${res.output}\n${footer}` }
+        ]);
+        setInput('');
+        setGhostSuggestion('');
+        return;
+      }
+
       if (output === '__LAUNCH_KSQL__') {
         setIsKsqlMode(true);
         await ksqlEngineRef.current.init();
