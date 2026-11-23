@@ -50,6 +50,55 @@ export const FullTerminalView: React.FC<FullTerminalViewProps> = ({ backend }) =
     }
   ]);
 
+  // Keep the terminal fast in long sessions: only the most recent lines stay on screen.
+  useEffect(() => {
+    if (lines.length > 3000) {
+      setLines((prev) => (prev.length > 3000 ? prev.slice(prev.length - 2500) : prev));
+    }
+  }, [lines.length]);
+
+  // Tell the student when saving fails (for example the browser's storage is full).
+  useEffect(() => {
+    let lastShown = 0;
+    const onStorageError = (e: Event) => {
+      const now = Date.now();
+      if (now - lastShown < 15000) return;
+      lastShown = now;
+      const detail = (e as CustomEvent).detail || 'Could not save to browser storage.';
+      setLines((prev) => [...prev, { id: `storage_err_${now}`, type: 'error', content: `[Storage] ${detail}` }]);
+    };
+    window.addEventListener('hadoop-storage-error', onStorageError);
+    return () => window.removeEventListener('hadoop-storage-error', onStorageError);
+  }, []);
+
+  // Two tabs would overwrite each other's saved files: warn in the second tab.
+  useEffect(() => {
+    const locks = (navigator as any).locks;
+    if (!locks || typeof locks.request !== 'function') return;
+    let release: (() => void) | null = null;
+    locks
+      .request('hadoop-simulator-primary-tab', { ifAvailable: true }, (lock: unknown) => {
+        if (!lock) {
+          setLines((prev) => [
+            ...prev,
+            {
+              id: `tab_warn_${Date.now()}`,
+              type: 'error',
+              content: '[Notice] Hadoop is already open in another tab or window. Use only one at a time: changes made in two places overwrite each other.'
+            }
+          ]);
+          return undefined;
+        }
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      if (release) release();
+    };
+  }, []);
+
   useEffect(() => {
     try {
       ksqlEngineRef.current.saveLocalFileCallback = (filename, content) => {
@@ -296,7 +345,7 @@ export const FullTerminalView: React.FC<FullTerminalViewProps> = ({ backend }) =
         setCommandHistoryList((prev) => [...prev, trimmedKsql]);
         setHistoryIndex(-1);
 
-        if (['exit', 'exit()', 'quit', 'quit()', 'exit;'].includes(lowerKsql)) {
+        if (['exit', 'exit()', 'quit', 'quit()', 'exit;', 'quit;', '!quit', '!q'].includes(lowerKsql)) {
           setIsKsqlMode(false);
           setLines((prev) => [
             ...prev,
@@ -470,20 +519,29 @@ export const FullTerminalView: React.FC<FullTerminalViewProps> = ({ backend }) =
       }
 
       const activeDirBefore = backend.getWorkingDir();
+      // Real Python must be ready before a script or a streaming job runs (first run after load).
+      if (/^(python3?\s+(?!-V\b|--version\b)\S|(hadoop|yarn)\s+jar\s+\S*streaming)/i.test(trimmed)) {
+        try {
+          await backend.preparePython();
+        } catch {
+          // The command still runs; the shell reports if Python is unavailable.
+        }
+      }
       const output = backend.executeCLI(trimmed);
       const activeDirAfter = backend.getWorkingDir();
       setCurrentDir(activeDirAfter);
 
-      if (typeof output === 'string' && output.startsWith('__PIG_EXEC__:')) {
-        const script = output.slice('__PIG_EXEC__:'.length);
+      if (typeof output === 'string' && (output.startsWith('__PIG_EXEC__:') || output.startsWith('__HIVE_EXEC__:'))) {
+        const isHive = output.startsWith('__HIVE_EXEC__:');
+        const script = output.slice(output.indexOf(':') + 1);
         await ksqlEngineRef.current.init();
         const res = await ksqlEngineRef.current.executeCommand(script);
-        const header = 'Apache Pig Latin Engine (local mode, SQLite WebAssembly)';
-        const footer = res.isError ? 'Pig Job Failed!' : 'Pig Job Complete - Success!';
+        const header = isHive ? 'Hive Session (local mode, SQLite WebAssembly)' : 'Apache Pig Latin Engine (local mode, SQLite WebAssembly)';
+        const footer = isHive ? '' : res.isError ? 'Pig Job Failed!' : 'Pig Job Complete - Success!';
         setLines((prev) => [
           ...prev,
           { id: `cmd_${Date.now()}`, type: 'prompt', workingDir: activeDirBefore, command: trimmed, content: '' },
-          { id: `pig_o_${Date.now()}`, type: res.isError ? 'error' : 'output', content: `${header}\n${res.output}\n${footer}` }
+          { id: `pig_o_${Date.now()}`, type: res.isError ? 'error' : 'output', content: `${header}\n${res.output}${footer ? '\n' + footer : ''}` }
         ]);
         setInput('');
         setGhostSuggestion('');

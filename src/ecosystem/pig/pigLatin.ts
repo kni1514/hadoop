@@ -121,6 +121,11 @@ export class PigLatin {
     return PigLatin.isPigStatement(s) || /^[a-zA-Z_]\w*\s*=\s*load\b/i.test(s) || /^store\s+\w+\s+into\b/i.test(s) || PIG_KEYWORDS.test(s);
   }
 
+  /** True when the alias was defined by a Pig statement (LOAD/FILTER/GROUP/...). */
+  public knows(alias: string): boolean {
+    return this.plans.has(alias) || this.groups.has(alias);
+  }
+
   /** Called by LOAD so EXPLAIN/ALIASES know about loaded relations. */
   public registerLoad(alias: string, path: string): void {
     this.groups.delete(alias);
@@ -353,7 +358,10 @@ export class PigLatin {
     this.requireRelation(alias);
     const r = db.exec(`SELECT * FROM ${q(alias)};`);
     if (r.length === 0 || r[0].values.length === 0) return { output: '(no records)', isError: false };
-    return { output: r[0].values.map((row: any[]) => `(${row.map(formatValue).join(',')})`).join('\n'), isError: false };
+    const all: any[][] = r[0].values;
+    const shown = all.slice(0, 1000).map((row: any[]) => `(${row.map(formatValue).join(',')})`);
+    if (all.length > 1000) shown.push(`... ${all.length - 1000} more tuple(s) not shown (${all.length} total). Use LIMIT, or STORE ${alias} INTO 'out.csv';`);
+    return { output: shown.join('\n'), isError: false };
   }
 
   private schemaString(alias: string): string {

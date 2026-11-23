@@ -1,4 +1,5 @@
 import { PYSPARK_PYTHON_SETUP } from '../spark/pysparkEngine';
+import { PYSPARK_EXTENSIONS } from '../spark/pysparkExtensions';
 
 export interface PythonExecutionResult {
   stdout: string;
@@ -127,10 +128,133 @@ export class PythonEngine {
   private pyodide: any = null;
   private pyodideInitPromise: Promise<void> | null = null;
   private isPySparkSetupDone: boolean = false;
+  private isPySparkModulesLoaded: boolean = false;
+  private isRunnerReady: boolean = false;
+  /** Files currently mirrored into Pyodide's filesystem and the content written there. */
+  private mirrored: Map<string, string> = new Map();
 
-  /** Copy the simulated shell filesystem into Pyodide without flattening paths. */
+  /** Python helpers shared by scripts, the Python REPL and the PySpark REPL. */
+  private static RUNNER = `
+import sys, io, ast, builtins, importlib, traceback, os
+
+__hadoop_real_input = builtins.input
+
+def __hadoop_purge_user_modules():
+    # A student edits word_count.py and runs again: Python must import the new code.
+    for __n, __m in list(sys.modules.items()):
+        __f = getattr(__m, '__file__', None) or ''
+        if __f.startswith('/home/Hacker/') or __f.startswith('/tmp/'):
+            sys.modules.pop(__n, None)
+    importlib.invalidate_caches()
+
+def __hadoop_format_exc(filename):
+    etype, value, tb = sys.exc_info()
+    te = traceback.TracebackException(etype, value, tb)
+    keep = [f for f in te.stack if not f.filename.startswith('/lib/') and f.filename != '<exec>' and f.name not in ('__hadoop_run',)]
+    te.stack = traceback.StackSummary.from_list(keep)
+    text = ''.join(te.format())
+    if not keep:
+        text = text.replace('Traceback (most recent call last):\\n', '')
+    return text.rstrip('\\n')
+
+def __hadoop_run(src, filename, argv, stdin_text, repl):
+    __hadoop_purge_user_modules()
+    sys.argv = list(argv) if argv else ['']
+    old_stdin = sys.stdin
+    old_input = builtins.input
+    if stdin_text is None:
+        def __js_input(prompt=''):
+            import js
+            value = js.__pyodide_input_handler(str(prompt))
+            return '' if value is None else str(value)
+        builtins.input = __js_input
+    else:
+        sys.stdin = io.StringIO(stdin_text)
+        def __stdin_input(prompt=''):
+            line = sys.stdin.readline()
+            if not line:
+                raise EOFError('EOF when reading a line')
+            return line.rstrip('\\n')
+        builtins.input = __stdin_input
+    try:
+        if repl:
+            ns = globals()
+            tree = ast.parse(src, '<stdin>', 'exec')
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last = ast.Expression(tree.body.pop().value)
+                if tree.body:
+                    exec(compile(tree, '<stdin>', 'exec'), ns)
+                value = eval(compile(last, '<stdin>', 'eval'), ns)
+                if value is not None:
+                    ns['_'] = value
+                    print(repr(value))
+            else:
+                exec(compile(tree, '<stdin>', 'exec'), ns)
+        else:
+            ns = {'__name__': '__main__', '__file__': filename, '__builtins__': builtins}
+            exec(compile(src, filename, 'exec'), ns)
+        return 0
+    except SystemExit as e:
+        code = e.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        print(code, file=sys.stderr)
+        return 1
+    except BaseException:
+        print(__hadoop_format_exc(filename), file=sys.stderr)
+        return 1
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.stdin = old_stdin
+        builtins.input = old_input
+`;
+
+  private ensureRunner(): void {
+    if (this.isRunnerReady || !this.pyodide) return;
+    this.pyodide.runPython(PythonEngine.RUNNER);
+    this.isRunnerReady = true;
+  }
+
+  /** Version string of the bundled Python, e.g. "Python 3.14.2". */
+  public getPythonVersion(): string | null {
+    if (!this.pyodide) return null;
+    try {
+      return 'Python ' + String(this.pyodide.runPython('import sys; sys.version.split()[0]'));
+    } catch {
+      return null;
+    }
+  }
+
+  public isReady(): boolean {
+    return !!this.pyodide;
+  }
+
+  /**
+   * Mirror the shell's files into Pyodide. Only changed files are written, and files
+   * deleted in the shell (rm) are removed from Pyodide too, so they cannot come back.
+   */
   private syncLocalFiles(localFiles?: Map<string, string>): void {
     if (!localFiles || !this.pyodide?.FS) return;
+    const fs = this.pyodide.FS;
+
+    for (const path of Array.from(this.mirrored.keys())) {
+      const normalized = path;
+      const stillThere = localFiles.has(normalized) || localFiles.has(normalized.replace(/^\/home\/Hacker\//, ''));
+      if (!stillThere) {
+        try {
+          fs.unlink(normalized);
+        } catch {
+          // Already gone.
+        }
+        this.mirrored.delete(path);
+      }
+    }
 
     const importDirs = new Set<string>(['/home/Hacker']);
     const pythonDirs = new Set<string>();
@@ -139,45 +263,32 @@ export class PythonEngine {
       const parent = normalized.slice(0, normalized.lastIndexOf('/')) || '/';
       importDirs.add(parent);
       if (normalized.endsWith('.py')) pythonDirs.add(parent);
+      if (this.mirrored.get(normalized) === content) return;
       try {
-        this.pyodide.FS.mkdirTree(parent);
-        this.pyodide.FS.writeFile(normalized, content);
+        fs.mkdirTree(parent);
+        fs.writeFile(normalized, content);
+        this.mirrored.set(normalized, content);
       } catch {
         // A duplicate or unsupported path should not stop Python execution.
       }
     });
 
-    // Make folder modules win over same-named .py files (for example n/ and n.py).
-    // This also lets imports work for folders that do not already contain __init__.py.
     pythonDirs.forEach((dir) => {
       if (dir !== '/home/Hacker') {
         try {
-          this.pyodide.FS.writeFile(`${dir}/__init__.py`, '');
+          if (!fs.analyzePath(`${dir}/__init__.py`).exists) fs.writeFile(`${dir}/__init__.py`, '');
         } catch {
           // The marker is only needed when the directory is writable.
         }
       }
     });
 
-    const dirs = JSON.stringify(Array.from(importDirs));
-    const topLevelPackages = JSON.stringify(
-      Array.from(pythonDirs)
-        .filter((dir) => dir.startsWith('/home/Hacker/') && dir !== '/home/Hacker')
-        .map((dir) => dir.slice('/home/Hacker/'.length).split('/')[0])
-    );
     try {
       this.pyodide.runPython(`
-import sys
-import importlib
-__project_paths = ${dirs}
-# Match the terminal's home directory so relative file operations see shell files.
-import os
+import sys, os, importlib
+__project_paths = ${JSON.stringify(Array.from(importDirs))}
 os.chdir('/home/Hacker')
-# Reorder existing paths too: Pyodide's /home/pyodide can already be ahead
-# of the simulated home directory and shadow a same-named project package.
 sys.path[:] = __project_paths + [p for p in sys.path if p not in __project_paths]
-for __name in ${topLevelPackages}:
-    sys.modules.pop(__name, None)
 importlib.invalidate_caches()
 `);
     } catch {
@@ -185,6 +296,7 @@ importlib.invalidate_caches()
     }
   }
 
+  /** Save files that Python created or changed back into the shell (only real changes). */
   private persistLocalFiles(onSaveFile?: (path: string, content: string) => void): void {
     if (!onSaveFile || !this.pyodide?.FS) return;
     const fs = this.pyodide.FS;
@@ -202,8 +314,12 @@ importlib.invalidate_caches()
           if (fs.isDir(stat.mode)) {
             if (name !== '__pycache__') visit(path);
           } else if (fs.isFile(stat.mode) && !name.endsWith('.pyc')) {
-            if (name === '__init__.py') continue;
-            onSaveFile(path, fs.readFile(path, { encoding: 'utf8' }));
+            if (name === '__init__.py' && this.mirrored.get(path) === undefined) continue;
+            const content = fs.readFile(path, { encoding: 'utf8' });
+            if (this.mirrored.get(path) !== content) {
+              this.mirrored.set(path, content);
+              onSaveFile(path, content);
+            }
           }
         } catch {
           // Ignore transient or unsupported entries and continue persisting others.
@@ -213,12 +329,67 @@ importlib.invalidate_caches()
     visit('/home/Hacker');
   }
 
+  /** Run code through the shared runner and capture stdout/stderr. */
+  private execCaptured(
+    code: string,
+    filename: string,
+    argv: string[],
+    stdinText: string | null,
+    repl: boolean,
+    localFiles?: Map<string, string>,
+    onSaveFile?: (path: string, content: string) => void,
+    inputs?: string[]
+  ): PythonExecutionResult {
+    // Capture raw bytes so output without a trailing newline (print(x, end='')) is kept exactly.
+    const outDec = new TextDecoder();
+    const errDec = new TextDecoder();
+    let outText = '';
+    let errText = '';
+    const out = { push: (s: string) => { outText += s; } };
+    let inputIndex = 0;
+    try {
+      this.pyodide.setStdout({ write: (buf: Uint8Array) => { outText += outDec.decode(buf, { stream: true }); return buf.length; } });
+      this.pyodide.setStderr({ write: (buf: Uint8Array) => { errText += errDec.decode(buf, { stream: true }); return buf.length; } });
+      this.syncLocalFiles(localFiles);
+      this.ensureRunner();
+      if (typeof window !== 'undefined') {
+        (window as any).__pyodide_input_handler = (promptMsg: string = '') => {
+          if (promptMsg) out.push(String(promptMsg));
+          if (inputs && inputIndex < inputs.length) return inputs[inputIndex++];
+          return '';
+        };
+      }
+      const payload = JSON.stringify(JSON.stringify([code, filename, argv, stdinText, repl]));
+      const exitCode = Number(this.pyodide.runPython(`__hadoop_run(*__import__('json').loads(${payload}))`)) || 0;
+      this.persistLocalFiles(onSaveFile);
+      outText += outDec.decode();
+      errText += errDec.decode();
+      return { stdout: outText.replace(/\n$/, ''), stderr: errText.replace(/\n$/, ''), exitCode };
+    } catch (e: any) {
+      return { stdout: outText.replace(/\n$/, ''), stderr: e?.message || String(e), exitCode: 1 };
+    }
+  }
+
+  /** Run a script with text on stdin (Hadoop Streaming mapper/reducer, shell pipes). */
+  public runWithStdin(code: string, stdinText: string, argv: string[], localFiles?: Map<string, string>): PythonExecutionResult | null {
+    if (!this.pyodide) return null;
+    this.pyodide.runPython(PYSPARK_PYTHON_SETUP);
+    return this.execCaptured(code, argv[0] || '<stdin>', argv, stdinText, false, localFiles);
+  }
+
   constructor() {
     this.initPyodide();
   }
 
   public resetPySparkRepl(): void {
     this.isPySparkSetupDone = false;
+  }
+
+  private ensurePySparkModules(): void {
+    if (this.isPySparkModulesLoaded || !this.pyodide) return;
+    this.pyodide.runPython(PYSPARK_PYTHON_SETUP);
+    this.pyodide.runPython(PYSPARK_EXTENSIONS);
+    this.isPySparkModulesLoaded = true;
   }
 
   public async runPythonReplLine(
@@ -230,20 +401,8 @@ importlib.invalidate_caches()
     if (!this.pyodide) {
       return { stdout: '', stderr: 'Python REPL could not start because the Pyodide runtime is unavailable.', exitCode: 1 };
     }
-
-    const logs: string[] = [];
-    const errors: string[] = [];
-    try {
-      this.pyodide.setStdout({ batched: (str: string) => logs.push(str) });
-      this.pyodide.setStderr({ batched: (str: string) => errors.push(str) });
-      this.syncLocalFiles(localFiles);
-      const result = this.pyodide.runPython(line);
-      const stdout = logs.join('\n') || (result === undefined || result === null ? '' : String(result));
-      this.persistLocalFiles(onSaveFile);
-      return { stdout, stderr: errors.join('\n'), exitCode: 0 };
-    } catch (err: any) {
-      return { stdout: logs.join('\n'), stderr: err.message || String(err), exitCode: 1 };
-    }
+    this.ensurePySparkModules();
+    return this.execCaptured(line, '<stdin>', [''], null, true, localFiles, onSaveFile);
   }
 
   public async runPySparkReplLine(
@@ -252,24 +411,17 @@ importlib.invalidate_caches()
     onSaveFile?: (path: string, content: string) => void
   ): Promise<PythonExecutionResult> {
     await this.initPyodide();
-
-    if (this.pyodide) {
-      const logs: string[] = [];
-      const errors: string[] = [];
-
+    if (!this.pyodide) {
+      return {
+        stdout: '',
+        stderr: 'PySpark REPL could not start because the Pyodide Python runtime is unavailable.',
+        exitCode: 1
+      };
+    }
+    this.ensurePySparkModules();
+    if (!this.isPySparkSetupDone) {
       try {
-        this.pyodide.setStdout({
-          batched: (str: string) => logs.push(str)
-        });
-        this.pyodide.setStderr({
-          batched: (str: string) => errors.push(str)
-        });
-
-        this.syncLocalFiles(localFiles);
-
-        if (!this.isPySparkSetupDone) {
-          this.pyodide.runPython(PYSPARK_PYTHON_SETUP);
-          this.pyodide.runPython(`
+        this.pyodide.runPython(`
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.types import *
@@ -277,36 +429,12 @@ from pyspark.sql.types import *
 spark = SparkSession.builder.appName("PySparkShell").getOrCreate()
 sc = spark.sparkContext
 `);
-          this.isPySparkSetupDone = true;
-        }
-
-        const result = this.pyodide.runPython(line);
-        let finalStdout = logs.join('\n');
-        if (result !== undefined && result !== null && !logs.length) {
-          finalStdout = String(result);
-        }
-
-        this.persistLocalFiles(onSaveFile);
-
-        return {
-          stdout: finalStdout,
-          stderr: errors.join('\n'),
-          exitCode: 0
-        };
+        this.isPySparkSetupDone = true;
       } catch (err: any) {
-        return {
-          stdout: logs.join('\n'),
-          stderr: err.message || String(err),
-          exitCode: 1
-        };
+        return { stdout: '', stderr: err?.message || String(err), exitCode: 1 };
       }
     }
-
-    return {
-      stdout: '',
-      stderr: 'PySpark REPL could not start because the Pyodide Python runtime is unavailable.',
-      exitCode: 1
-    };
+    return this.execCaptured(line, '<stdin>', [''], null, true, localFiles, onSaveFile);
   }
 
   public async initPyodide(): Promise<void> {
@@ -353,72 +481,17 @@ sc = spark.sparkContext
     code: string,
     inputs: string[] = [],
     localFiles?: Map<string, string>,
-    onSaveFile?: (path: string, content: string) => void
+    onSaveFile?: (path: string, content: string) => void,
+    scriptName: string = '<string>',
+    argv?: string[]
   ): PythonExecutionResult | null {
     if (!this.pyodide) return null;
-
-    const logs: string[] = [];
-    const errors: string[] = [];
-    let inputIndex = 0;
-
-    const customInput = (promptMsg: string = ''): string => {
-      if (promptMsg) logs.push(promptMsg);
-      if (inputIndex < inputs.length) {
-        return inputs[inputIndex++];
-      }
-      return '';
-    };
-
     try {
-      this.pyodide.setStdout({
-        batched: (str: string) => logs.push(str)
-      });
-      this.pyodide.setStderr({
-        batched: (str: string) => errors.push(str)
-      });
-
-      this.syncLocalFiles(localFiles);
-
-      (window as any).__pyodide_input_handler = customInput;
-      this.pyodide.runPython(`
-import sys
-import os
-import js
-
-if "." not in sys.path:
-    sys.path.insert(0, ".")
-if "/home/Hacker" not in sys.path:
-    sys.path.insert(0, "/home/Hacker")
-
-def __custom_input__(prompt=""):
-    return js.__pyodide_input_handler(prompt)
-
-import builtins
-builtins.input = __custom_input__
-`);
-
-      this.pyodide.runPython(PYSPARK_PYTHON_SETUP);
-
-      const result = this.pyodide.runPython(code);
-      let finalStdout = logs.join('\n');
-      if (result !== undefined && result !== null && !logs.length) {
-        finalStdout = String(result);
-      }
-
-      this.persistLocalFiles(onSaveFile);
-
-      return {
-        stdout: finalStdout,
-        stderr: errors.join('\n'),
-        exitCode: 0
-      };
+      this.ensurePySparkModules();
     } catch (err: any) {
-      return {
-        stdout: logs.join('\n'),
-        stderr: err.message || String(err),
-        exitCode: 1
-      };
+      return { stdout: '', stderr: err?.message || String(err), exitCode: 1 };
     }
+    return this.execCaptured(code, scriptName, argv || [scriptName, ...inputs], null, false, localFiles, onSaveFile, inputs);
   }
 
   public fallbackExecuteSync(

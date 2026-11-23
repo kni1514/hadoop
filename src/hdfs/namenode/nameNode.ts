@@ -100,6 +100,13 @@ export class NameNode {
     const textContent = typeof content === 'string' ? content : new TextDecoder().decode(content);
     const totalSize = data.length;
 
+    // Overwriting a file must release the old file's blocks first, otherwise the
+    // DataNodes keep counting space for data that no longer exists.
+    const existing = this.namespace.resolvePath(pathStr);
+    if (existing && existing.type === 'FILE') {
+      this.releaseFileBlocks(existing);
+    }
+
     const file = this.namespace.createFile(pathStr, totalSize, replicationFactor, blockSizeBytes);
     this.fileContentMap.set(file.path, textContent);
 
@@ -157,6 +164,140 @@ export class NameNode {
     }
 
     return file;
+  }
+
+  /** Free every block of a file: block map, DataNode block lists, used bytes and stored bytes. */
+  private releaseFileBlocks(file: INodeFile): void {
+    for (const blockId of file.blocks) {
+      const block = this.blockMap.get(blockId);
+      if (block) {
+        for (const replica of block.replicas) {
+          const dn = this.dataNodes.get(replica.nodeId);
+          if (dn) {
+            dn.blocks = dn.blocks.filter((b) => b !== blockId);
+            dn.storageUsedBytes = Math.max(0, dn.storageUsedBytes - block.sizeBytes);
+          }
+        }
+      }
+      this.blockMap.delete(blockId);
+      this.storageEngine.deleteBlockData(blockId);
+    }
+    this.fileContentMap.delete(file.path);
+  }
+
+  /** All files under a path (the path itself when it is a file). */
+  public listFilesUnder(pathStr: string): INodeFile[] {
+    const node = this.namespace.resolvePath(pathStr);
+    const files: INodeFile[] = [];
+    const walk = (n: any) => {
+      if (!n) return;
+      if (n.type === 'FILE') files.push(n);
+      else n.children.forEach((c: any) => walk(c));
+    };
+    walk(node);
+    return files;
+  }
+
+  /**
+   * Delete a file or directory and release its storage.
+   * Returns false when the path does not exist; throws for a non-empty directory without recursive.
+   */
+  public deletePath(pathStr: string, recursive: boolean = false): boolean {
+    const node = this.namespace.resolvePath(pathStr);
+    if (!node) return false;
+    if (node.type === 'DIRECTORY' && node.children.size > 0 && !recursive) {
+      throw new Error(`Directory is not empty: ${this.namespace.normalizePath(pathStr)}`);
+    }
+    const files = this.listFilesUnder(pathStr);
+    const ok = this.namespace.deletePath(pathStr, recursive);
+    if (ok) files.forEach((f) => this.releaseFileBlocks(f));
+    return ok;
+  }
+
+  /** Rename/move a file or directory inside HDFS (metadata only, like real HDFS). */
+  public renamePath(srcPath: string, dstPath: string): void {
+    const ns = this.namespace;
+    const src = ns.normalizePath(srcPath);
+    const dst = ns.normalizePath(dstPath);
+    if (src === '/') throw new Error('Cannot rename the root directory');
+    if (dst === src || dst.startsWith(src + '/')) throw new Error(`Cannot move '${src}' into itself`);
+    const node = ns.resolvePath(src);
+    if (!node) throw new Error(`\`${src}': No such file or directory`);
+    if (ns.resolvePath(dst)) throw new Error(`\`${dst}': File exists`);
+    const dstParentPath = dst.substring(0, dst.lastIndexOf('/')) || '/';
+    const dstParent = ns.resolvePath(dstParentPath);
+    if (!dstParent || dstParent.type !== 'DIRECTORY') throw new Error(`\`${dstParentPath}': No such file or directory`);
+    const srcParent = ns.resolvePath(src.substring(0, src.lastIndexOf('/')) || '/') as any;
+
+    const oldFiles = this.listFilesUnder(src).map((f) => f.path);
+    srcParent.children.delete(node.name);
+    node.name = dst.substring(dst.lastIndexOf('/') + 1);
+    (dstParent as any).children.set(node.name, node);
+    const repath = (n: any, p: string) => {
+      n.path = p;
+      if (n.type === 'DIRECTORY') n.children.forEach((c: any) => repath(c, (p === '/' ? '' : p) + '/' + c.name));
+    };
+    repath(node, dst);
+    const now = Date.now();
+    srcParent.modifiedAt = now;
+    (dstParent as any).modifiedAt = now;
+
+    for (const oldPath of oldFiles) {
+      const newPath = dst + oldPath.substring(src.length);
+      const content = this.fileContentMap.get(oldPath);
+      this.fileContentMap.delete(oldPath);
+      if (content !== undefined) this.fileContentMap.set(newPath, content);
+      const file = ns.resolvePath(newPath) as INodeFile | undefined;
+      file?.blocks.forEach((b) => {
+        const block = this.blockMap.get(b);
+        if (block) block.filePath = newPath;
+      });
+    }
+  }
+
+  /** Change a file's replication factor and add/remove replicas to match. */
+  public setReplication(pathStr: string, replication: number): void {
+    const file = this.namespace.resolvePath(pathStr);
+    if (!file || file.type !== 'FILE') throw new Error(`\`${pathStr}': No such file`);
+    const target = Math.max(1, Math.min(replication, 512));
+    file.replicationFactor = target;
+    const liveNodes = this.getDataNodes().filter((n) => n.state === 'RUNNING');
+    for (const blockId of file.blocks) {
+      const block = this.blockMap.get(blockId);
+      if (!block) continue;
+      while (block.replicas.length > target) {
+        const removed = block.replicas.pop()!;
+        const dn = this.dataNodes.get(removed.nodeId);
+        if (dn) {
+          dn.blocks = dn.blocks.filter((b) => b !== blockId);
+          dn.storageUsedBytes = Math.max(0, dn.storageUsedBytes - block.sizeBytes);
+        }
+      }
+      if (block.replicas.length < target) {
+        const existing = new Set(block.replicas.map((r) => r.nodeId));
+        const extra = this.placementPolicy.chooseTargets(liveNodes, undefined, target - block.replicas.length, existing);
+        extra.forEach((dn) => {
+          block.replicas.push({ blockId, nodeId: dn.id, rackId: dn.rackId, state: 'FINALIZED', storagePath: `/data/${blockId}`, updatedAt: this.engine.getClock().getTime() });
+          dn.blocks.push(blockId);
+          dn.storageUsedBytes += block.sizeBytes;
+        });
+      }
+    }
+  }
+
+  /** Erase all HDFS data (used by 'hdfs namenode -format'). */
+  public formatNamespace(): void {
+    this.listFilesUnder('/').forEach((f) => this.releaseFileBlocks(f));
+    const root = this.namespace.getRoot();
+    root.children.clear();
+    root.modifiedAt = Date.now();
+    this.fileContentMap.clear();
+  }
+
+  public getBlocksOf(pathStr: string): Block[] {
+    const file = this.namespace.resolvePath(pathStr);
+    if (!file || file.type !== 'FILE') return [];
+    return file.blocks.map((b) => this.blockMap.get(b)).filter(Boolean) as Block[];
   }
 
   public readFileContent(pathStr: string): string | undefined {

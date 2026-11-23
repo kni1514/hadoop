@@ -9,6 +9,14 @@ import './index.css';
 // or Safari's Share > Add to Home Screen. The install event is not
 // intercepted, so the browser can show its native install UI.
 
+// Ask the browser to keep this app's data (HDFS files, tables, scripts) even when the
+// disk gets full. Installed apps are usually granted this automatically.
+if (navigator.storage && typeof navigator.storage.persist === 'function') {
+  navigator.storage.persisted().then((already) => {
+    if (!already) navigator.storage.persist().catch(() => {});
+  }).catch(() => {});
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

@@ -60,6 +60,16 @@ function postBuild() {
     console.log('✓ Synced public/manifest.json to dist and root');
   }
 
+  // Give every build its own offline-cache name so installed apps pick up the new
+  // version (and drop the old cache) on their next online visit.
+  const distSw = path.join(distDir, 'sw.js');
+  if (fs.existsSync(distSw)) {
+    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    const swText = fs.readFileSync(distSw, 'utf8').replace(/hadoop-offline-[\w-]+/, `hadoop-offline-${stamp}`);
+    fs.writeFileSync(distSw, swText, 'utf8');
+    console.log(`✓ Service worker cache version set to hadoop-offline-${stamp}`);
+  }
+
   // Copy public/dist files (sw.js, logo.svg, hadoop_logo.jpg) to root
   const rootFilesToCopy = ['sw.js', 'logo.svg', 'hadoop_logo.jpg'];
   rootFilesToCopy.forEach((fileName) => {

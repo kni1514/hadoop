@@ -1,5 +1,9 @@
 import { HadoopDB } from '../../storage/hadoopDB';
 import { PigLatin, PIG_HELP, splitTopLevel } from '../pig/pigLatin';
+import { HiveSession, registerHiveFunctions } from './hiveQL';
+
+/** Results bigger than this are cut in the terminal (a browser cannot render millions of lines). */
+const MAX_DISPLAY_ROWS = 1000;
 
 export interface KSQLExecutionResult {
   output: string;
@@ -12,10 +16,57 @@ export class KSQLEngine {
   private initPromise: Promise<void> | null = null;
   private hadoopDB: HadoopDB = new HadoopDB();
   private pig: PigLatin = new PigLatin(() => this.db);
+  private hive: HiveSession = new HiveSession(() => this.db, {
+    readLocal: async (path: string) => {
+      const files = await this.hadoopDB.loadAllLocalFiles();
+      const abs = path.startsWith('/') ? path : `/home/Hacker/${path.replace(/^\.\//, '')}`;
+      if (files.has(abs)) return files.get(abs);
+      const under = [...files.keys()].filter((k) => k.startsWith(abs.replace(/\/+$/, '') + '/')).sort();
+      if (under.length) return under.map((k) => files.get(k) || '').join('');
+      return undefined;
+    },
+    readHdfs: (path: string) => {
+      const w: any = typeof window !== 'undefined' ? window : null;
+      return w && w.__hadoop_hdfs_read ? w.__hadoop_hdfs_read(path) : null;
+    },
+    deleteHdfs: (path: string) => {
+      const w: any = typeof window !== 'undefined' ? window : null;
+      if (w && w.__hadoop_hdfs_delete) w.__hadoop_hdfs_delete(path);
+    },
+    hdfsShell: (command: string) => {
+      const w: any = typeof window !== 'undefined' ? window : null;
+      return w && w.__hadoop_cli ? String(w.__hadoop_cli(command)) : 'HDFS shell is not available here.';
+    }
+  });
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   public saveLocalFileCallback?: (filename: string, content: string) => void;
 
-  constructor() {}
+  constructor() {
+    if (typeof window !== 'undefined') {
+      // Save pending SQL changes when the tab is hidden or closed.
+      const flush = () => {
+        if (this.persistTimer) {
+          clearTimeout(this.persistTimer);
+          this.persistTimer = null;
+          this.persistDatabase();
+        }
+      };
+      window.addEventListener('pagehide', flush);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flush();
+      });
+    }
+  }
+
+  /** Saving exports the whole database, so batch quick successive changes into one save. */
+  private schedulePersist(): void {
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistDatabase();
+    }, 800);
+  }
 
   public async init(): Promise<void> {
     if (typeof window === 'undefined') return;
@@ -52,10 +103,16 @@ export class KSQLEngine {
             await this.hadoopDB.waitReady();
             const savedBytes = await this.hadoopDB.loadKSQLDatabase();
             if (savedBytes && savedBytes.length > 0) {
-              this.db = new this.sqlLib.Database(savedBytes);
+              try {
+                this.db = new this.sqlLib.Database(savedBytes);
+              } catch {
+                // A damaged saved database must not lock the student out: start fresh.
+                this.db = new this.sqlLib.Database();
+              }
             } else {
               this.db = new this.sqlLib.Database();
             }
+            registerHiveFunctions(this.db);
           }
           resolve();
         } catch (err: any) {
@@ -133,8 +190,15 @@ export class KSQLEngine {
     }
 
     if (!fileContent) {
+      // Pig usually loads from HDFS: try the HDFS path too.
+      const w: any = typeof window !== 'undefined' ? window : null;
+      const fromHdfs = w && w.__hadoop_hdfs_read ? w.__hadoop_hdfs_read(filePath) : null;
+      if (fromHdfs !== null && fromHdfs !== undefined) fileContent = String(fromHdfs);
+    }
+
+    if (!fileContent) {
       return {
-        output: `Error: Local file "${filePath}" not found in terminal directory. Use vim ${filePath} to create it first.`,
+        output: `Error: "${filePath}" was not found in the local folder or in HDFS. Create it with vim ${filePath} (or upload it with hdfs dfs -put).`,
         isError: true
       };
     }
@@ -188,18 +252,30 @@ export class KSQLEngine {
       this.db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (${colDefs});`);
 
       let insertedCount = 0;
-      for (let i = startIdx; i < lines.length; i++) {
-        const rowVals = lines[i].split(delimiter).map(v => v.trim().replace(/^['"]|['"]$/g, ''));
-        const safeVals = headers.map((_, colIdx) => {
-          const raw = rowVals[colIdx] ?? '';
-          return `'${raw.replace(/'/g, "''")}'`;
-        });
-        this.db.exec(`INSERT INTO ${tableName} VALUES (${safeVals.join(', ')});`);
-        insertedCount++;
+      // One prepared statement inside one transaction: 100,000 rows load in well under a second.
+      const stmt = this.db.prepare(`INSERT INTO ${tableName} VALUES (${headers.map(() => '?').join(', ')})`);
+      this.db.exec('BEGIN');
+      try {
+        for (const row of dataRows) {
+          stmt.run(headers.map((_, colIdx) => {
+            const raw = row[colIdx] ?? '';
+            if (raw === '') return null;
+            if (colTypes[colIdx] === 'INTEGER' && /^-?\d+$/.test(raw)) return Number(raw);
+            if (colTypes[colIdx] === 'REAL' && !isNaN(Number(raw))) return Number(raw);
+            return raw;
+          }));
+          insertedCount++;
+        }
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      } finally {
+        stmt.free();
       }
 
-      await this.persistDatabase();
-      this.pig.registerLoad(tableName, filePath);
+      this.schedulePersist();
+      if (isPigAssign) this.pig.registerLoad(tableName, filePath);
       return {
         output: `Successfully loaded ${insertedCount} records from "${filePath}" into table "${tableName}".`,
         isError: false
@@ -279,6 +355,7 @@ export class KSQLEngine {
     if (!this.db && this.sqlLib) {
       try {
         this.db = new this.sqlLib.Database();
+        registerHiveFunctions(this.db);
       } catch {}
     }
 
@@ -289,9 +366,9 @@ export class KSQLEngine {
       return { output: '', isError: false };
     }
 
-    // Several Pig statements on one line / in one script: run them in order.
-    const statements = splitTopLevel(trimmed, ';');
-    if (statements.length > 1 && statements.some((st) => PigLatin.looksLikePig(st))) {
+    // Several statements on one line / in one script: run them one by one, like the Hive and Pig shells.
+    const statements = splitTopLevel(trimmed.replace(/^\s*--.*$/gm, ''), ';');
+    if (statements.length > 1) {
       const outputs: string[] = [];
       for (const st of statements) {
         const res = await this.executeCommand(st);
@@ -301,10 +378,28 @@ export class KSQLEngine {
       return { output: outputs.join('\n'), isError: false };
     }
 
+    // DESCRIBE x: Pig schema for Pig relations, Hive layout for tables created with SQL/HiveQL.
+    const describeMatch = trimmed.replace(/;\s*$/, '').match(/^(describe|desc)\s+(\w+)$/i);
+    if (describeMatch && !this.pig.knows(describeMatch[2]) && describeMatch[2].toLowerCase() !== 'table') {
+      return this.hive.describePlain(describeMatch[2]);
+    }
+
     if (PigLatin.isPigStatement(trimmed)) {
       const res = this.pig.execute(trimmed);
-      if (!res.isError) await this.persistDatabase();
+      if (!res.isError) this.schedulePersist();
       return res;
+    }
+
+    if (this.db) {
+      try {
+        const hiveRes = await this.hive.tryExecute(trimmed);
+        if (hiveRes) {
+          if (!hiveRes.isError) this.schedulePersist();
+          return hiveRes;
+        }
+      } catch (e: any) {
+        return { output: 'FAILED: ' + (e?.message || String(e)), isError: true };
+      }
     }
 
     if (lowerQuery === 'pig help' || lowerQuery === 'help pig' || lowerQuery === '\\h') {
@@ -348,7 +443,7 @@ ${PIG_HELP}`,
     if (lowerQuery === 'tables') {
       if (!this.db) return { output: 'No tables found in the database.', isError: false };
       try {
-        const result = this.db.exec("SELECT name FROM sqlite_master WHERE type='table';");
+        const result = this.db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%';");
         if (result.length > 0 && result[0].values.length > 0) {
           let outputText = 'Tables:\n';
           result[0].values.forEach((row: any[]) => {
@@ -398,17 +493,21 @@ ${PIG_HELP}`,
     if (!this.db) return { output: 'Database not initialized.', isError: true };
 
     try {
-      const result = this.db.exec(query);
-      await this.persistDatabase();
+      const result = this.db.exec(this.hive.translate(query));
+      if (!/^\s*(select|with|pragma|explain)\b/i.test(trimmed)) this.schedulePersist();
 
       if (result.length > 0) {
         let outputText = '';
         result.forEach((table: any) => {
           outputText += table.columns.join(' | ') + '\n';
           outputText += '-'.repeat(table.columns.join(' | ').length) + '\n';
-          table.values.forEach((row: any[]) => {
-            outputText += row.join(' | ') + '\n';
+          const shown = table.values.slice(0, MAX_DISPLAY_ROWS);
+          shown.forEach((row: any[]) => {
+            outputText += row.map((v: any) => (v === null ? 'NULL' : v)).join(' | ') + '\n';
           });
+          if (table.values.length > MAX_DISPLAY_ROWS) {
+            outputText += `... ${table.values.length - MAX_DISPLAY_ROWS} more row(s) not shown (${table.values.length} total). Add LIMIT, or save them with: store <table> into 'out.csv'\n`;
+          }
         });
         return { output: outputText.trim(), isError: false };
       } else {

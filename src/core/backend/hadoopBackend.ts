@@ -25,6 +25,7 @@ export interface HadoopBackend {
   readLocalFile(filePath: string): string | undefined;
   getWorkingDir(): string;
   initFromDB(): Promise<void>;
+  preparePython(): Promise<void>;
 }
 
 export class SimulatorBackend implements HadoopBackend {
@@ -74,6 +75,11 @@ export class SimulatorBackend implements HadoopBackend {
 
   public async initFromDB(): Promise<void> {
     await this.shellExecutor.loadFromDB();
+  }
+
+  /** Make sure Pyodide is loaded before a python/streaming command runs. */
+  public async preparePython(): Promise<void> {
+    await this.shellExecutor.preparePython();
   }
 
   public getBackendType(): 'SIMULATOR' | 'REAL_HADOOP' {

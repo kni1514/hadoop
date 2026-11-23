@@ -70,28 +70,83 @@ export class HadoopDB {
   }
 
   private get<T>(store: string, key: string): Promise<T | undefined> {
-    return new Promise((resolve, reject) => {
-      const req = this.tx(store).objectStore(store).get(key);
-      req.onsuccess = () => resolve(req.result as T | undefined);
-      req.onerror = () => reject(req.error);
-    });
+    return this.ready.then(
+      () =>
+        new Promise<T | undefined>((resolve) => {
+          try {
+            const req = this.tx(store).objectStore(store).get(key);
+            req.onsuccess = () => resolve(req.result as T | undefined);
+            req.onerror = () => resolve(undefined);
+          } catch {
+            resolve(undefined);
+          }
+        }),
+      () => undefined
+    );
   }
 
+  /**
+   * Writes wait until the database is open (a command typed right after page load must
+   * not be lost) and never reject: a full disk is reported once through the
+   * 'hadoop-storage-error' window event instead of breaking the shell.
+   */
   private put(store: string, key: string, value: unknown): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const req = this.tx(store, 'readwrite').objectStore(store).put(value, key);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    return this.ready.then(
+      () =>
+        new Promise<void>((resolve) => {
+          try {
+            const tx = this.tx(store, 'readwrite');
+            tx.objectStore(store).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => {
+              this.reportError(tx.error);
+              resolve();
+            };
+            tx.onabort = () => {
+              this.reportError(tx.error);
+              resolve();
+            };
+          } catch (err) {
+            this.reportError(err);
+            resolve();
+          }
+        }),
+      () => undefined
+    );
+  }
+
+  private reportError(err: unknown): void {
+    const name = (err as any)?.name || '';
+    const message = name === 'QuotaExceededError'
+      ? 'Browser storage is full. Delete large files (rm / hdfs dfs -rm) or free disk space; new changes are not being saved.'
+      : `Could not save to browser storage: ${(err as any)?.message || name || 'unknown error'}`;
+    if (typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(new CustomEvent('hadoop-storage-error', { detail: message }));
+      } catch {
+        // Older browsers without CustomEvent support simply skip the notice.
+      }
+    }
   }
 
   private del(store: string, key: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const req = this.tx(store, 'readwrite').objectStore(store).delete(key);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    return this.ready.then(
+      () =>
+        new Promise<void>((resolve) => {
+          try {
+            const tx = this.tx(store, 'readwrite');
+            tx.objectStore(store).delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+            tx.onabort = () => resolve();
+          } catch {
+            resolve();
+          }
+        }),
+      () => undefined
+    );
   }
+
 
   private getAllKeys(store: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
@@ -179,28 +234,33 @@ export class HadoopDB {
     return this.get<ShellState>(STORE_SHELL_STATE, 'state');
   }
 
+  /** HDFS file metadata (replication, permissions, owner, group, times) keyed by path. */
+  async saveHdfsMeta(meta: Record<string, unknown>): Promise<void> {
+    await this.put(STORE_SHELL_STATE, 'hdfsMeta', meta);
+  }
+
+  async loadHdfsMeta(): Promise<Record<string, any> | undefined> {
+    return this.get<Record<string, any>>(STORE_SHELL_STATE, 'hdfsMeta');
+  }
+
+  /** The SQL database is stored as raw bytes (IndexedDB handles binary natively). */
   async saveKSQLDatabase(data: Uint8Array): Promise<void> {
-    let binary = '';
-    const bytes = new Uint8Array(data);
-    const len = bytes.byteLength;
-    const chunkSize = 0x8000;
-    for (let i = 0; i < len; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
-    }
-    const base64 = btoa(binary);
-    await this.put(STORE_KSQL_DATABASE, 'db_binary', base64);
+    await this.put(STORE_KSQL_DATABASE, 'db_binary', new Uint8Array(data));
   }
 
   async loadKSQLDatabase(): Promise<Uint8Array | undefined> {
-    const base64 = await this.get<string>(STORE_KSQL_DATABASE, 'db_binary');
-    if (!base64 || typeof base64 !== 'string') return undefined;
-    const binary = atob(base64);
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binary.charCodeAt(i);
+    const stored = await this.get<unknown>(STORE_KSQL_DATABASE, 'db_binary');
+    if (!stored) return undefined;
+    if (stored instanceof Uint8Array) return stored;
+    if (stored instanceof ArrayBuffer) return new Uint8Array(stored);
+    if (typeof stored === 'string') {
+      // Older versions saved base64 text; keep reading it.
+      const binary = atob(stored);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
     }
-    return bytes;
+    return undefined;
   }
 
   async getStorageEstimate(): Promise<{ usageBytes: number; quotaBytes: number }> {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hadoop-offline-v7';
+const CACHE_NAME = 'hadoop-offline-v8';
 const APP_SHELL = './index.html';
 
 const STATIC_ASSETS = [
@@ -13,6 +13,7 @@ const STATIC_ASSETS = [
   './sql/sql-wasm.js',
   './sql/sql-wasm.wasm',
   './pyodide/pyodide.js',
+  './pyodide/pyodide.asm.mjs',
   './pyodide/pyodide.asm.wasm',
   './pyodide/python_stdlib.zip',
   './pyodide/pyodide-lock.json'

@@ -1,10 +1,24 @@
 import { NameNode } from '../../hdfs/namenode/nameNode';
 import { ResourceManager } from '../../yarn/resourcemanager/resourceManager';
 import { MapReduceEngine } from '../../mapreduce/engine/mapReduceEngine';
-import { parseHadoopCommand, ParsedCommand } from '../parser/lexerParser';
+import { parseHadoopCommand, ParsedCommand, shellSplit } from '../parser/lexerParser';
 import { INodeFile } from '../../core/domain/types';
 import { HadoopDB, ShellState } from '../../storage/hadoopDB';
 import { PythonEngine, transpilePythonToJS } from '../../ecosystem/python/pythonEngine';
+import { DfsShell, DfsContext, normalizeHdfsPath, humanSize } from '../../hdfs/shell/dfsShell';
+import { wordCount, grep as grepJob, piEstimate, wordMean, sortLines, streamingShuffle, JobResult } from '../../mapreduce/jobs/exampleJobs';
+
+interface FinishedJob {
+  jobId: string;
+  appId: string;
+  name: string;
+  user: string;
+  queue: string;
+  state: 'SUCCEEDED' | 'FAILED';
+  startTime: number;
+  finishTime: number;
+  output: string;
+}
 
 
 const ABOUT_GUIDE_CONTENT = `================================================================================
@@ -360,6 +374,14 @@ export class HadoopShellExecutor {
     '/home/Hacker/hadoop/etc/hadoop'
   ]);
 
+  private dfs!: DfsShell;
+  private lastExitCode: number = 0;
+  private safeModeManual: boolean = false;
+  private historyServerRunning: boolean = false;
+  private finishedJobs: FinishedJob[] = [];
+  private jobSequence: number = 0;
+  private readonly clusterTimestamp: number = Date.now();
+
   private cachedStorageUsage: number = 0;
   private cachedStorageQuota: number = 0;
 
@@ -369,7 +391,200 @@ export class HadoopShellExecutor {
     this.mapReduceEngine = mapReduceEngine;
     this.pythonEngine = new PythonEngine();
     this.db = db;
+    this.dfs = new DfsShell(this.makeDfsContext());
+    this.exposeHdfsToPython();
     this.startStorageRefresh();
+  }
+
+  /** Lets Python/PySpark code read and write HDFS paths (sc.textFile('hdfs:///x'), spark.read.csv('/x')). */
+  private exposeHdfsToPython(): void {
+    if (typeof window === 'undefined') return;
+    const w = window as any;
+    w.__hadoop_hdfs_read = (p: string) => {
+      const path = normalizeHdfsPath(String(p));
+      const node = this.nameNode.getNamespace().resolvePath(path);
+      if (!node) return null;
+      if (node.type === 'FILE') return this.nameNode.readFileContent(path) ?? '';
+      return this.nameNode
+        .listFilesUnder(path)
+        .filter((f) => !f.name.startsWith('_') && !f.name.startsWith('.'))
+        .sort((a, b) => a.path.localeCompare(b.path))
+        .map((f) => this.nameNode.readFileContent(f.path) ?? '')
+        .join('');
+    };
+    w.__hadoop_hdfs_exists = (p: string) => !!this.nameNode.getNamespace().resolvePath(normalizeHdfsPath(String(p)));
+    w.__hadoop_hdfs_write = (p: string, content: string) => {
+      const path = normalizeHdfsPath(String(p));
+      const file = this.nameNode.createAndWriteFile(path, String(content), this.confInt('dfs.replication', 3), this.confInt('dfs.blocksize', 134217728));
+      file.owner = 'user';
+      this.db.saveHdfsFileContent(path, String(content));
+      return true;
+    };
+    w.__hadoop_hdfs_delete = (p: string) => {
+      const path = normalizeHdfsPath(String(p));
+      this.nameNode.listFilesUnder(path).forEach((f) => this.db.deleteHdfsFileContent(f.path));
+      this.db.deleteHdfsFileContent(path);
+      try {
+        this.nameNode.deletePath(path, true);
+      } catch {
+        // Nothing to delete.
+      }
+      this.scheduleMetaSave();
+      return true;
+    };
+    w.__hadoop_cli = (command: string) => this.execute(String(command));
+    w.__hadoop_hdfs_mkdir = (p: string) => {
+      const path = normalizeHdfsPath(String(p));
+      this.nameNode.getNamespace().mkdir(path, true);
+      this.db.saveHdfsFileContent(path, '__HADOOP_DIR__');
+      return true;
+    };
+  }
+
+  private makeDfsContext(): DfsContext {
+    return {
+      nameNode: this.nameNode,
+      user: 'user',
+      readLocal: (p) => this.localFiles.get(this.resolveLocalPath(p)),
+      writeLocal: (p, content) => {
+        const resolved = this.resolveLocalPath(p);
+        this.ensureLocalParents(resolved);
+        this.localFiles.set(resolved, content);
+        this.db.saveLocalFile(resolved, content);
+      },
+      deleteLocal: (p) => {
+        const resolved = this.resolveLocalPath(p);
+        if (!this.localFiles.has(resolved)) return false;
+        this.localFiles.delete(resolved);
+        this.db.deleteLocalFile(resolved);
+        return true;
+      },
+      isLocalDir: (p) => this.localDirs.has(this.resolveLocalPath(p)),
+      makeLocalDir: (p) => {
+        const resolved = this.resolveLocalPath(p);
+        this.ensureLocalParents(resolved + '/x');
+      },
+      listLocalFilesUnder: (p) => {
+        const root = this.resolveLocalPath(p).replace(/\/+$/, '');
+        return [...this.localFiles.keys()].filter((k) => k.startsWith(root + '/')).sort();
+      },
+      resolveLocal: (p) => this.resolveLocalPath(p),
+      persistFile: (p, content) => {
+        this.db.saveHdfsFileContent(p, content);
+        this.scheduleMetaSave();
+      },
+      persistDir: (p) => {
+        this.db.saveHdfsFileContent(p, '__HADOOP_DIR__');
+        this.scheduleMetaSave();
+      },
+      forget: (p) => {
+        this.db.deleteHdfsFileContent(p);
+        this.scheduleMetaSave();
+      },
+      persistMeta: () => this.scheduleMetaSave(),
+      conf: (key, fallback) => this.getConf(key, fallback),
+      inSafeMode: () => this.safeModeManual,
+      setExitCode: (code) => {
+        this.lastExitCode = code;
+      }
+    };
+  }
+
+  private ensureLocalParents(filePath: string): void {
+    const parts = filePath.split('/').filter(Boolean);
+    let current = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      current += '/' + parts[i];
+      if (!this.localDirs.has(current)) {
+        this.localDirs.add(current);
+        this.db.saveLocalDir(current);
+      }
+    }
+  }
+
+  /** Read a Hadoop property from the (editable) XML files in ~/hadoop/etc/hadoop, then defaults. */
+  public getConf(key: string, fallback: string): string {
+    const files = ['core-site.xml', 'hdfs-site.xml', 'mapred-site.xml', 'yarn-site.xml'];
+    for (const f of files) {
+      const xml = this.localFiles.get(`/home/Hacker/hadoop/etc/hadoop/${f}`) ?? this.localFiles.get(`/etc/hadoop/${f}`);
+      if (!xml) continue;
+      const re = /<property>\s*<name>\s*([^<]+?)\s*<\/name>\s*<value>\s*([^<]*?)\s*<\/value>/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null) {
+        if (m[1] === key) return m[2];
+      }
+    }
+    const defaults: Record<string, string> = {
+      'fs.defaultFS': 'hdfs://localhost:9000',
+      'dfs.replication': '3',
+      'dfs.blocksize': '134217728',
+      'dfs.namenode.name.dir': 'file:///home/Hacker/hadoop/data/dfs/name',
+      'dfs.datanode.data.dir': 'file:///home/Hacker/hadoop/data/dfs/data',
+      'dfs.namenode.http-address': '0.0.0.0:9870',
+      'dfs.permissions.enabled': 'true',
+      'mapreduce.framework.name': 'yarn',
+      'yarn.resourcemanager.address': 'localhost:8032',
+      'yarn.nodemanager.aux-services': 'mapreduce_shuffle',
+      'hadoop.tmp.dir': '/tmp/hadoop-Hacker',
+      'fs.trash.interval': '0'
+    };
+    return defaults[key] ?? fallback;
+  }
+
+  private confInt(key: string, fallback: number): number {
+    const v = parseInt(this.getConf(key, String(fallback)), 10);
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  }
+
+  private metaTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Save permissions/replication/owner/time of every HDFS path (debounced). */
+  private scheduleMetaSave(): void {
+    if (this.metaTimer) clearTimeout(this.metaTimer);
+    this.metaTimer = setTimeout(() => {
+      this.metaTimer = null;
+      const meta: Record<string, unknown> = {};
+      const walk = (n: any) => {
+        meta[n.path] = n.type === 'FILE'
+          ? { t: 'f', r: n.replicationFactor, p: n.permissions, o: n.owner, g: n.group, m: n.modifiedAt, c: n.createdAt }
+          : { t: 'd', p: n.permissions, o: n.owner, g: n.group, m: n.modifiedAt, c: n.createdAt };
+        if (n.type === 'DIRECTORY') n.children.forEach((c: any) => walk(c));
+      };
+      walk(this.nameNode.getNamespace().getRoot());
+      meta.__safemode = this.safeModeManual;
+      this.db.saveHdfsMeta(meta);
+    }, 250);
+  }
+
+  private applyHdfsMeta(meta: Record<string, any>): void {
+    Object.entries(meta).forEach(([path, m]) => {
+      if (path === '__safemode') {
+        this.safeModeManual = !!m;
+        return;
+      }
+      if (!m || typeof m !== 'object') return;
+      let node = this.nameNode.getNamespace().resolvePath(path);
+      if (!node && m.t === 'd') {
+        try {
+          node = this.nameNode.getNamespace().mkdir(path, true);
+        } catch {
+          return;
+        }
+      }
+      if (!node) return;
+      if (m.p) node.permissions = m.p;
+      if (m.o) node.owner = m.o;
+      if (m.g) node.group = m.g;
+      if (m.m) node.modifiedAt = m.m;
+      if (m.c) node.createdAt = m.c;
+      if (node.type === 'FILE' && m.r && m.r !== node.replicationFactor) {
+        try {
+          this.nameNode.setReplication(path, m.r);
+        } catch {
+          // Keep the default replication when the stored value cannot be applied.
+        }
+      }
+    });
   }
 
   private startStorageRefresh(): void {
@@ -492,6 +707,9 @@ export class HadoopShellExecutor {
         }
       });
     }
+
+    const meta = await this.db.loadHdfsMeta();
+    if (meta) this.applyHdfsMeta(meta);
   }
 
 
@@ -537,7 +755,27 @@ export class HadoopShellExecutor {
 
     if (trimmed) {
       this.historyList.push(trimmed);
+      // Keep history bounded so long sessions stay fast to save and load.
+      if (this.historyList.length > 1000) this.historyList.splice(0, this.historyList.length - 1000);
       this.db.saveCommandHistory(this.historyList);
+    }
+
+    if (/^echo\s+["']?\$\?["']?\s*$/.test(trimmed)) {
+      return String(this.lastExitCode);
+    }
+    this.lastExitCode = 0;
+
+    const daemonMatch = trimmed.match(/^(?:hdfs|yarn|mapred)\s+--daemon\s+(\S+)\s+(\S+)/i)
+      || trimmed.match(/^(?:hadoop-daemon\.sh|yarn-daemon\.sh|hdfs-daemon\.sh|mr-jobhistory-daemon\.sh)\s+(?:--config\s+\S+\s+)?(\S+)\s+(\S+)/i);
+    if (daemonMatch) {
+      return this.runDaemonCommand(daemonMatch[1].toLowerCase(), daemonMatch[2]);
+    }
+    if (/^(hadoop|hdfs|yarn|mapred)\s+(version|-version|--version)\s*$/i.test(trimmed)) {
+      return this.hadoopVersionText();
+    }
+    if (/^yarn\s+jar\s/i.test(trimmed)) {
+      if (!this.isYARNStarted) return `Unable to connect to ResourceManager at localhost:8032. Run 'start-yarn.sh' first.`;
+      return this.runJar(parseHadoopCommand(trimmed.replace(/^yarn/i, 'hadoop')).positionalArgs, trimmed);
     }
 
     const cmd = parseHadoopCommand(commandLine);
@@ -736,6 +974,22 @@ Run 'start-dfs.sh' or 'start-all.sh' to start NameNode & DataNodes.`;
       return this.executeHDFSCommand(cmd);
     }
 
+    if (cmd.utility === 'mapred') {
+      if (cmd.subcommand === 'job' && !this.isYARNStarted) {
+        return `Unable to connect to ResourceManager at localhost:8032. Run 'start-yarn.sh' first.`;
+      }
+      return this.mapredCommand(cmd);
+    }
+
+    if (cmd.utility === 'hadoop' && cmd.subcommand !== 'jar' && cmd.subcommand !== 'distcp') {
+      if (cmd.subcommand === 'dfs' && !this.isHDFSStarted) {
+        return `${(cmd.action || '-ls').replace(/^-/, '')}: Call From localhost/127.0.0.1 to localhost:9000 failed on connection exception: java.net.ConnectException: Connection refused
+Hadoop HDFS services are currently STOPPED. Run 'start-dfs.sh' or 'start-all.sh'.`;
+      }
+      if (cmd.subcommand === 'dfs') return this.executeHDFSCommand(cmd);
+      return this.executeHadoopCommand(cmd);
+    }
+
     if (cmd.utility === 'hadoop') {
       if (!this.isYARNStarted) {
         return `Unable to connect to ResourceManager at localhost:8088. Connection refused.
@@ -887,6 +1141,30 @@ undefined
       return `__PIG_EXEC__:${content}`;
     }
 
+    if (act === 'hive' && (args[0] === '-e' || args[0] === '-f')) {
+      if (args[0] === '-e') {
+        const script = cmd.raw.trim().replace(/^hive\s+-e\s+/i, '').trim().replace(/^(["'])([\s\S]*)\1$/, '$2');
+        return script ? `__HIVE_EXEC__:${script}` : 'Usage: hive -e "SELECT ..."';
+      }
+      const content = args[1] ? this.getLocalFileContent(this.resolveLocalPath(args[1])) : undefined;
+      if (content === undefined) return `Could not open input file for reading. (${args[1] || 'missing file name'})`;
+      return `__HIVE_EXEC__:${content}`;
+    }
+
+    if (act === 'beeline') {
+      const eIdx = args.indexOf('-e');
+      const fIdx = args.indexOf('-f');
+      if (eIdx >= 0) {
+        const m = cmd.raw.match(/\s-e\s+(["'])([\s\S]*)\1/) || cmd.raw.match(/\s-e\s+(\S+)/);
+        return `__HIVE_EXEC__:${m ? m[m.length - 1] : ''}`;
+      }
+      if (fIdx >= 0) {
+        const content = this.getLocalFileContent(this.resolveLocalPath(args[fIdx + 1] || ''));
+        return content === undefined ? `${args[fIdx + 1]} (No such file or directory)` : `__HIVE_EXEC__:${content}`;
+      }
+      return '__LAUNCH_KSQL__';
+    }
+
     if (act === 'hive' || act === 'pig') {
       return '__LAUNCH_KSQL__';
     }
@@ -917,6 +1195,9 @@ undefined
       if (this.isYARNStarted) {
         processList.push('19842 ResourceManager');
         processList.push('20115 NodeManager');
+      }
+      if (this.historyServerRunning) {
+        processList.push('20877 JobHistoryServer');
       }
       processList.push('21045 Jps');
       return processList.join('\n');
@@ -962,11 +1243,12 @@ ${result}`;
       this.pythonEngine.initPyodide();
 
       if (args[0] === '-v' || args[0] === '--version' || args[0] === '-V') {
-        return `Python 3.11.3 (Pyodide WebAssembly Engine)`;
+        return `${this.pythonEngine.getPythonVersion() || 'Python 3.14.2'} (Pyodide WebAssembly Engine)`;
       }
 
       let codeToRun = '';
       const suppliedInputs: string[] = [];
+      let scriptName = '<string>';
 
       if (args[0] === '-c') {
         codeToRun = args.slice(1).join(' ').replace(/^["']|["']$/g, '');
@@ -976,6 +1258,7 @@ ${result}`;
         const content = this.getLocalFileContent(resolved);
         if (content !== undefined) {
           codeToRun = content;
+          scriptName = scriptFile;
           if (args.length > 1) {
             suppliedInputs.push(...args.slice(1));
           }
@@ -986,7 +1269,7 @@ ${result}`;
         }
       }
 
-      return this.executePython(codeToRun, suppliedInputs);
+      return this.executePython(codeToRun, suppliedInputs, scriptName);
     }
 
     if (act === 'ps') {
@@ -1154,12 +1437,19 @@ Swap:           2048           0        2048`;
 
     if (act === 'cat') {
       if (args.length === 0) return 'cat: missing file operand';
-      const target = this.resolveLocalPath(args[0]);
-      const content = this.getLocalFileContent(target);
-      if (content !== undefined) {
-        return content;
+      const parts: string[] = [];
+      for (const name of args) {
+        const target = this.resolveLocalPath(name);
+        const content = this.getLocalFileContent(target);
+        if (content !== undefined) {
+          parts.push(content.endsWith('\n') ? content.slice(0, -1) : content);
+        } else if (this.localDirs.has(target)) {
+          parts.push(`cat: ${name}: Is a directory`);
+        } else {
+          parts.push(`cat: ${name}: No such file or directory`);
+        }
       }
-      return `cat: ${args[0]}: No such file or directory`;
+      return parts.join('\n');
     }
 
     if (act === 'grep') {
@@ -1436,22 +1726,7 @@ Swap:           2048           0        2048`;
     }
 
     if (subcommand === 'namenode' || flags.has('-format') || action === '-format' || positionalArgs.includes('-format')) {
-      this.isNameNodeFormatted = true;
-      this.persistShellState();
-      return `26/09/02 15:00:00 INFO namenode.NameNode: STARTUP_MSG:
-/************************************************************
-STARTUP_MSG: Starting NameNode
-STARTUP_MSG:   host = localhost/127.0.0.1
-STARTUP_MSG:   version = 3.3.6
-************************************************************/
-26/09/02 15:00:01 INFO namenode.FSNamesystem: Formatting NameNode in /home/Hacker/hadoop/data/dfs/name
-26/09/02 15:00:01 INFO namenode.FSImage: Storage directory /home/Hacker/hadoop/data/dfs/name has been successfully formatted.
-26/09/02 15:00:01 INFO namenode.FSImage: Creating initial FSImage checkpoint with Cluster ID: CID-8f92a10b-4e12-4c22-901a
-26/09/02 15:00:01 INFO namenode.NameNode: SHUTDOWN_MSG:
-/************************************************************
-SHUTDOWN_MSG: Shutting down NameNode at localhost/127.0.0.1
-************************************************************/
-✓ NameNode formatted successfully. Ready for 'start-dfs.sh'.`;
+      return this.formatNameNode(flags.has('-force') || positionalArgs.includes('-force'));
     }
 
     if (subcommand === 'haadmin') {
@@ -1470,6 +1745,15 @@ SHUTDOWN_MSG: Shutting down NameNode at localhost/127.0.0.1
     }
 
     if (subcommand === 'dfs') {
+      // -find takes its own options (-name/-iname): give it the words in their original order.
+      let dfsArgs = positionalArgs;
+      if (action === '-find') {
+        const words = shellSplit(cmd.raw);
+        const at = words.indexOf('-find');
+        dfsArgs = at >= 0 ? words.slice(at + 1) : positionalArgs;
+      }
+      const handled = this.dfs.run(action || '-help', flags, dfsArgs);
+      if (handled !== null) return handled;
       switch (action) {
         case '-find': {
           const pathArg = positionalArgs[0] || '/';
@@ -1795,41 +2079,11 @@ SHUTDOWN_MSG: Shutting down NameNode at localhost/127.0.0.1
     }
 
     if (subcommand === 'fsck') {
-      const pathStr = positionalArgs[0] || '/';
+      return this.runFsck(positionalArgs[0] || '/', flags);
+    }
 
-      if (flags.has('-files') || flags.has('-blocks') || flags.has('-locations')) {
-        return `Connecting to NameNode at localhost:9000...
-FSCK started by Hacker for path ${pathStr} at ${new Date().toISOString()}
-. Status: HEALTHY
-/file.txt 1024 bytes, 1 block(s):  OK
-0. BP-10023412-127.0.0.1-1700000000:blk_1073741825_1001 len=1024 repl=3 [datanode1.hadoop.local:9866, datanode2.hadoop.local:9866, datanode3.hadoop.local:9866]
-
-The filesystem under path '${pathStr}' is HEALTHY`;
-      }
-
-      const report = this.nameNode.runFSCK(pathStr);
-      const lines = [
-        `+-------------------------------------------------------------+`,
-        `|                    HDFS FILE SYSTEM CHECK                   |`,
-        `+-------------------------------------------------------------+`,
-        ` Status:                       ${report.isHealthy ? 'HEALTHY ✓' : 'UNHEALTHY ✗'}`,
-        ` Total size:                    ${report.totalFiles * 1024} B`,
-        ` Total files:                   ${report.totalFiles}`,
-        ` Total blocks:                  ${report.totalBlocks}`,
-        ` Minimally replicated blocks:   ${report.totalBlocks}`,
-        ` Over-replicated blocks:        0`,
-        ` Under-replicated blocks:       ${report.underReplicatedBlocks}`,
-        ` Mis-replicated blocks:         0`,
-        ` Default replication factor:    3`,
-        ` Average block replication:     ${report.totalBlocks > 0 ? (report.totalReplicas / report.totalBlocks).toFixed(2) : 0}`,
-        ` Corrupt blocks:                ${report.corruptBlocks}`,
-        ` Missing replicas:              ${report.missingBlocks}`,
-        `+-------------------------------------------------------------+`
-      ];
-      if (report.details.length > 0) {
-        lines.push(`\nDetails:\n` + report.details.join('\n'));
-      }
-      return lines.join('\n');
+    if (subcommand === 'getconf') {
+      return this.runGetconf(action, positionalArgs);
     }
 
     if (subcommand === 'dfsadmin') {
@@ -1891,30 +2145,589 @@ Replication Queues: Empty`);
       }
 
       if (action === '-report') {
-        const dns = this.nameNode.getDataNodes();
-        const lines = [
-          `Configured Capacity: ${dns.length * 10} GB`,
-          `Present Capacity: ${dns.length * 10} GB`,
-          `DFS Remaining: ${(dns.length * 10) - 0.1} GB`,
-          `DFS Used: 0.1 GB`,
-          `DFS Used%: 1.0%`,
-          `Under replicated blocks: 0`,
-          `Blocks with corrupt replicas: 0`,
-          `Missing blocks: 0`,
-          `-------------------------------------------------`,
-          `Live datanodes (${dns.length}):\n`
-        ];
-        dns.forEach((dn) => {
-          lines.push(`Name: ${dn.hostname} (${dn.id})\nHostname: ${dn.hostname}\nRack: ${dn.rackId}\nState: ${dn.state}\nUsed: ${dn.storageUsedBytes} B\nBlocks: ${dn.blocks.length}\nLast Heartbeat: OK\n`);
-        });
-        return lines.join('\n');
+        return this.dfsadminReport();
       }
       if (action === '-safemode') {
-        return `Safe mode is ${this.nameNode.getState() === 'SAFE_MODE' ? 'ON' : 'OFF'}`;
+        const op = (positionalArgs[0] || 'get').toLowerCase();
+        if (op === 'enter') {
+          this.safeModeManual = true;
+          this.scheduleMetaSave();
+          return 'Safe mode is ON';
+        }
+        if (op === 'leave' || op === 'forceexit') {
+          this.safeModeManual = false;
+          this.scheduleMetaSave();
+          return 'Safe mode is OFF';
+        }
+        return `Safe mode is ${this.safeModeManual ? 'ON' : 'OFF'}`;
       }
+      if (action === '-printTopology') {
+        const byRack = new Map<string, string[]>();
+        this.nameNode.getDataNodes().forEach((d) => {
+          if (!byRack.has(d.rackId)) byRack.set(d.rackId, []);
+          byRack.get(d.rackId)!.push(`   127.0.0.1:9866 (${d.hostname}) ${d.state === 'RUNNING' ? 'In Service' : 'Dead'}`);
+        });
+        return [...byRack.entries()].sort().map(([r, ns]) => `Rack: ${r}\n${ns.join('\n')}\n`).join('\n');
+      }
+      return `Usage: hdfs dfsadmin
+\t[-report [-live] [-dead]]
+\t[-safemode <enter | leave | get | wait | forceExit>]
+\t[-saveNamespace]
+\t[-refreshNodes]
+\t[-setQuota <quota> <dirname>...<dirname>]
+\t[-setSpaceQuota <quota> <dirname>...<dirname>]
+\t[-printTopology]
+\t[-metasave filename]`;
+    }
+
+    if (subcommand === 'version') {
+      return this.hadoopVersionText();
     }
 
     return `Unsupported hdfs subcommand: ${subcommand}`;
+  }
+
+  private hadoopVersionText(): string {
+    return `Hadoop 3.3.6
+Source code repository: git -r 1be78238728da9266a4f88195058f08fd012bf9c
+Compiled by ubuntu on 2023-06-18T08:22Z
+Compiled on platform linux-x86_64
+Compiled with protoc 3.7.1
+From source with checksum 5652179ad55f76cb287d9c633bb53bbd
+This command was run using /home/Hacker/hadoop/share/hadoop/common/hadoop-common-3.3.6.jar`;
+  }
+
+  private formatNameNode(force: boolean): string {
+    const root = this.nameNode.getNamespace().getRoot();
+    const hasData = root.children.size > 0;
+    const nameDir = this.getConf('dfs.namenode.name.dir', 'file:///home/Hacker/hadoop/data/dfs/name').replace(/^file:\/\//, '');
+    if (hasData && !force) {
+      return `Re-format filesystem in Storage Directory root= ${nameDir}; location= null ? (Y or N)
+HDFS already holds data and formatting ERASES all of it.
+To keep your files, simply run 'start-dfs.sh' (no format needed).
+To erase everything and start fresh, run: hdfs namenode -format -force`;
+    }
+    if (hasData) {
+      this.nameNode.listFilesUnder('/').forEach((f) => this.db.deleteHdfsFileContent(f.path));
+      const dirs: string[] = [];
+      const walk = (n: any) => {
+        if (n.type === 'DIRECTORY') {
+          if (n.path !== '/') dirs.push(n.path);
+          n.children.forEach((c: any) => walk(c));
+        }
+      };
+      walk(root);
+      dirs.forEach((d) => this.db.deleteHdfsFileContent(d));
+      this.nameNode.formatNamespace();
+      this.scheduleMetaSave();
+    }
+    this.isNameNodeFormatted = true;
+    this.persistShellState();
+    const d = new Date();
+    const two = (n: number) => String(n).padStart(2, '0');
+    const ts = `${String(d.getFullYear()).slice(2)}/${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+    const hex = (n: number) => Math.random().toString(16).slice(2, 2 + n).padEnd(n, '0');
+    const cid = `CID-${hex(8)}-${hex(4)}-${hex(4)}-${hex(4)}-${hex(12)}`;
+    return `${ts} INFO namenode.NameNode: STARTUP_MSG:
+/************************************************************
+STARTUP_MSG: Starting NameNode
+STARTUP_MSG:   host = localhost/127.0.0.1
+STARTUP_MSG:   args = [-format]
+STARTUP_MSG:   version = 3.3.6
+************************************************************/
+${ts} INFO namenode.FSNamesystem: Formatting NameNode in ${nameDir}
+${ts} INFO common.Storage: Storage directory ${nameDir} has been successfully formatted.
+${ts} INFO namenode.FSImage: Creating initial FSImage checkpoint with Cluster ID: ${cid}
+${ts} INFO namenode.NameNode: SHUTDOWN_MSG:
+/************************************************************
+SHUTDOWN_MSG: Shutting down NameNode at localhost/127.0.0.1
+************************************************************/
+✓ NameNode formatted successfully. Ready for 'start-dfs.sh'.`;
+  }
+
+  private runFsck(pathArg: string, flags: Set<string>): string {
+    const path = normalizeHdfsPath(pathArg);
+    const ns = this.nameNode.getNamespace();
+    const start = new Date();
+    const header = [
+      `Connecting to namenode via http://localhost:9870/fsck?ugi=Hacker&path=${encodeURIComponent(path)}`,
+      `FSCK started by Hacker (auth:SIMPLE) from /127.0.0.1 for path ${path} at ${start.toString()}`
+    ];
+    const target = ns.resolvePath(path);
+    if (!target) {
+      return [...header, `FSCK ended at ${new Date().toString()} in 1 milliseconds`, `Path '${path}' does not exist`, '', `Fsck on path '${path}' FAILED`].join('\n');
+    }
+    const showFiles = flags.has('-files');
+    const showBlocks = flags.has('-blocks');
+    const showLoc = flags.has('-locations');
+    const showRacks = flags.has('-racks');
+    const lines: string[] = [];
+    let dirs = 0, files = 0, blocks = 0, size = 0, replicas = 0, under = 0, over = 0, missing = 0, corrupt = 0, minRepl = 0, missingReplicas = 0;
+    const defaultRep = this.confInt('dfs.replication', 3);
+    const dnById = new Map(this.nameNode.getDataNodes().map((d) => [d.id, d]));
+    const walk = (n: any) => {
+      if (n.type === 'DIRECTORY') {
+        dirs++;
+        if (showFiles) lines.push(`${n.path} <dir>`);
+        [...n.children.values()].sort((a: any, b: any) => a.name.localeCompare(b.name)).forEach(walk);
+        return;
+      }
+      files++;
+      size += n.sizeBytes;
+      const fileBlocks = this.nameNode.getBlocksOf(n.path);
+      let fileStatus = 'OK';
+      const blockLines: string[] = [];
+      fileBlocks.forEach((b, i) => {
+        blocks++;
+        const live = b.replicas.filter((r) => dnById.get(r.nodeId)?.state === 'RUNNING');
+        replicas += live.length;
+        if (live.length >= 1) minRepl++;
+        if (b.checksumStatus === 'CORRUPTED') {
+          corrupt++;
+          fileStatus = 'CORRUPT';
+        }
+        if (live.length === 0) {
+          missing++;
+          fileStatus = 'MISSING';
+        } else if (live.length < n.replicationFactor) {
+          under++;
+          missingReplicas += n.replicationFactor - live.length;
+          if (fileStatus === 'OK') fileStatus = `Under replicated ${b.id}. Target Replicas is ${n.replicationFactor} but found ${live.length} live replica(s)`;
+        } else if (live.length > n.replicationFactor) over++;
+        if (showBlocks) {
+          const loc = showLoc || showRacks
+            ? ' [' + live.map((r) => {
+                const dn = dnById.get(r.nodeId);
+                return `DatanodeInfoWithStorage[127.0.0.1:9866,DS-${r.nodeId},DISK]${showRacks ? ` ${dn?.rackId}/${dn?.hostname}` : ''}`;
+              }).join(', ') + ']'
+            : '';
+          blockLines.push(`${i}. BP-1350457290-127.0.0.1-${this.clusterTimestamp}:${b.id}_${b.generationStamp} len=${b.sizeBytes} Live_repl=${live.length}${loc}`);
+        }
+      });
+      if (showFiles) {
+        lines.push(`${n.path} ${n.sizeBytes} bytes, replicated: replication=${n.replicationFactor}, ${fileBlocks.length} block(s):  ${fileStatus}`);
+        lines.push(...blockLines);
+        if (blockLines.length) lines.push('');
+      }
+    };
+    walk(target);
+    const pct = (x: number) => (blocks ? ((x / blocks) * 100).toFixed(1) : '0.0');
+    const healthy = missing === 0 && corrupt === 0;
+    const racks = new Set(this.nameNode.getDataNodes().map((d) => d.rackId)).size;
+    const avgBlock = blocks ? Math.round(size / blocks) : 0;
+    const status = healthy ? 'HEALTHY' : 'CORRUPT';
+    const totalRepl = replicas + missingReplicas;
+    const body = [
+      '',
+      `Status: ${status}`,
+      ` Number of data-nodes:\t${this.nameNode.getDataNodes().filter((d) => d.state === 'RUNNING').length}`,
+      ` Number of racks:\t\t${racks}`,
+      ` Total dirs:\t\t\t${dirs}`,
+      ` Total symlinks:\t\t0`,
+      '',
+      'Replicated Blocks:',
+      ` Total size:\t${size} B`,
+      ` Total files:\t${files}`,
+      ` Total blocks (validated):\t${blocks} (avg. block size ${avgBlock} B)`,
+      ` Minimally replicated blocks:\t${minRepl} (${pct(minRepl)} %)`,
+      ` Over-replicated blocks:\t${over} (${pct(over)} %)`,
+      ` Under-replicated blocks:\t${under} (${pct(under)} %)`,
+      ` Mis-replicated blocks:\t\t0 (0.0 %)`,
+      ` Default replication factor:\t${defaultRep}`,
+      ` Average block replication:\t${blocks ? (replicas / blocks).toFixed(1) : '0.0'}`,
+      ` Missing blocks:\t\t${missing}`,
+      ` Corrupt blocks:\t\t${corrupt}`,
+      ` Missing replicas:\t\t${missingReplicas} (${totalRepl ? ((missingReplicas / totalRepl) * 100).toFixed(1) : '0.0'} %)`,
+      ` Blocks queued for replication:\t${under}`,
+      `FSCK ended at ${new Date().toString()} in ${Math.max(1, Date.now() - start.getTime())} milliseconds`,
+      '',
+      `The filesystem under path '${path}' is ${status}`
+    ];
+    return [...header, ...lines, ...body].join('\n');
+  }
+
+  private dfsadminReport(): string {
+    const dns = this.nameNode.getDataNodes();
+    const cap = dns.reduce((a, n) => a + n.storageCapacityBytes, 0);
+    const used = dns.reduce((a, n) => a + n.storageUsedBytes, 0);
+    const live = dns.filter((d) => d.state === 'RUNNING');
+    const dead = dns.filter((d) => d.state !== 'RUNNING');
+    let under = 0;
+    let missing = 0;
+    this.nameNode.listFilesUnder('/').forEach((f) =>
+      this.nameNode.getBlocksOf(f.path).forEach((b) => {
+        const n = b.replicas.filter((r) => dns.find((d) => d.id === r.nodeId)?.state === 'RUNNING').length;
+        if (n === 0) missing++;
+        else if (n < f.replicationFactor) under++;
+      })
+    );
+    const h = (n: number) => `${n} (${n < 1024 ? n + ' B' : humanSize(n) + 'B'})`;
+    const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(2) : '0.00');
+    const out = [
+      `Configured Capacity: ${h(cap)}`,
+      `Present Capacity: ${h(cap)}`,
+      `DFS Remaining: ${h(cap - used)}`,
+      `DFS Used: ${h(used)}`,
+      `DFS Used%: ${pct(used, cap)}%`,
+      `Replicated Blocks:`,
+      `\tUnder replicated blocks: ${under}`,
+      `\tBlocks with corrupt replicas: 0`,
+      `\tMissing blocks: ${missing}`,
+      `\tMissing blocks (with replication factor 1): 0`,
+      `\tLow redundancy blocks with highest priority to recover: ${missing}`,
+      `\tPending deletion blocks: 0`,
+      '',
+      '-------------------------------------------------',
+      `Live datanodes (${live.length}):`,
+      ''
+    ];
+    const describe = (dn: any) => {
+      out.push(
+        `Name: 127.0.0.1:9866 (${dn.hostname})`,
+        `Hostname: ${dn.hostname}`,
+        `Rack: ${dn.rackId}`,
+        `Decommission Status : Normal`,
+        `Configured Capacity: ${h(dn.storageCapacityBytes)}`,
+        `DFS Used: ${h(dn.storageUsedBytes)}`,
+        `Non DFS Used: 0 (0 B)`,
+        `DFS Remaining: ${h(dn.storageCapacityBytes - dn.storageUsedBytes)}`,
+        `DFS Used%: ${pct(dn.storageUsedBytes, dn.storageCapacityBytes)}%`,
+        `DFS Remaining%: ${pct(dn.storageCapacityBytes - dn.storageUsedBytes, dn.storageCapacityBytes)}%`,
+        `Num of Blocks: ${dn.blocks.length}`,
+        `Last contact: ${new Date().toString()}`,
+        ''
+      );
+    };
+    live.forEach(describe);
+    if (dead.length) {
+      out.push(`Dead datanodes (${dead.length}):`, '');
+      dead.forEach(describe);
+    }
+    return out.join('\n');
+  }
+
+  private runGetconf(action: string | undefined, args: string[]): string {
+    switch (action) {
+      case '-confKey':
+        if (!args[0]) return 'Usage: hdfs getconf -confKey [key]';
+        return this.getConf(args[0], '') || `Configuration ${args[0]} is missing.`;
+      case '-namenodes':
+      case '-secondaryNameNodes':
+        return 'localhost';
+      case '-backupNodes':
+      case '-journalNodes':
+        return '';
+      case '-nnRpcAddresses':
+        return this.getConf('fs.defaultFS', 'hdfs://localhost:9000').replace(/^hdfs:\/\//, '');
+      default:
+        return `hdfs getconf is utility for getting configuration information from the config file.
+
+hadoop getconf
+\t[-namenodes]\t\t\tgets list of namenodes in the cluster.
+\t[-secondaryNameNodes]\t\tgets list of secondary namenodes in the cluster.
+\t[-backupNodes]\t\t\tgets list of backup nodes in the cluster.
+\t[-nnRpcAddresses]\t\tgets the namenode rpc addresses
+\t[-confKey [key]]\t\tgets a specific key from the configuration`;
+    }
+  }
+
+  /** Read every file under HDFS input paths (file, directory, comma list) like FileInputFormat. */
+  private readJobInput(inputArgs: string[]): { texts: string[]; paths: string[] } | string {
+    const texts: string[] = [];
+    const paths: string[] = [];
+    for (const arg of inputArgs) {
+      for (const one of arg.split(',')) {
+        const path = normalizeHdfsPath(one);
+        const node = this.nameNode.getNamespace().resolvePath(path);
+        if (!node) {
+          return `Exception in thread "main" org.apache.hadoop.mapreduce.lib.input.InvalidInputException: Input path does not exist: hdfs://localhost:9000${path}`;
+        }
+        this.nameNode
+          .listFilesUnder(path)
+          .filter((f) => !f.name.startsWith('_') && !f.name.startsWith('.'))
+          .sort((a, b) => a.path.localeCompare(b.path))
+          .forEach((f) => {
+            texts.push(this.nameNode.readFileContent(f.path) ?? '');
+            paths.push(f.path);
+          });
+      }
+    }
+    return { texts, paths };
+  }
+
+  private jobLog(jobName: string, inputCount: number, result: JobResult, outputDir: string | null, numReduces = 1): string {
+    this.jobSequence++;
+    const seq = String(this.jobSequence).padStart(4, '0');
+    const jobId = `job_${this.clusterTimestamp}_${seq}`;
+    const appId = `application_${this.clusterTimestamp}_${seq}`;
+    const startTime = Date.now();
+    const stamp = () => {
+      const t = new Date();
+      const two = (n: number) => String(n).padStart(2, '0');
+      return `${t.getFullYear()}-${two(t.getMonth() + 1)}-${two(t.getDate())} ${two(t.getHours())}:${two(t.getMinutes())}:${two(t.getSeconds())},${String(t.getMilliseconds()).padStart(3, '0')}`;
+    };
+    const c = result.counters;
+    const splits = Math.max(1, inputCount);
+    const lines = [
+      `${stamp()} INFO client.DefaultNoHARMFailoverProxyProvider: Connecting to ResourceManager at localhost/127.0.0.1:8032`,
+      `${stamp()} INFO input.FileInputFormat: Total input files to process : ${inputCount}`,
+      `${stamp()} INFO mapreduce.JobSubmitter: number of splits:${splits}`,
+      `${stamp()} INFO mapreduce.JobSubmitter: Submitting tokens for job: ${jobId}`,
+      `${stamp()} INFO impl.YarnClientImpl: Submitted application ${appId}`,
+      `${stamp()} INFO mapreduce.Job: The url to track the job: http://localhost:8088/proxy/${appId}/`,
+      `${stamp()} INFO mapreduce.Job: Running job: ${jobId}`,
+      `${stamp()} INFO mapreduce.Job: Job ${jobId} running in uber mode : false`,
+      `${stamp()} INFO mapreduce.Job:  map 0% reduce 0%`,
+      `${stamp()} INFO mapreduce.Job:  map 100% reduce 0%`,
+      `${stamp()} INFO mapreduce.Job:  map 100% reduce 100%`,
+      `${stamp()} INFO mapreduce.Job: Job ${jobId} completed successfully`,
+      `${stamp()} INFO mapreduce.Job: Counters: 54`,
+      `\tFile System Counters`,
+      `\t\tHDFS: Number of bytes read=${c.bytesRead}`,
+      `\t\tHDFS: Number of bytes written=${c.bytesWritten}`,
+      `\t\tHDFS: Number of read operations=${3 * splits + 3}`,
+      `\t\tHDFS: Number of write operations=${outputDir ? 2 : 0}`,
+      `\tJob Counters `,
+      `\t\tLaunched map tasks=${splits}`,
+      `\t\tLaunched reduce tasks=${numReduces}`,
+      `\t\tData-local map tasks=${splits}`,
+      `\tMap-Reduce Framework`,
+      `\t\tMap input records=${c.mapInputRecords}`,
+      `\t\tMap output records=${c.mapOutputRecords}`,
+      `\t\tReduce input groups=${c.reduceInputGroups}`,
+      `\t\tReduce output records=${c.reduceOutputRecords}`,
+      `\t\tShuffled Maps =${splits * numReduces}`,
+      `\t\tFailed Shuffles=0`,
+      `\tFile Input Format Counters `,
+      `\t\tBytes Read=${c.bytesRead}`,
+      `\tFile Output Format Counters `,
+      `\t\tBytes Written=${c.bytesWritten}`
+    ];
+    if (result.summary) lines.push(result.summary);
+    if (outputDir) lines.push(`✓ Output written to HDFS: ${outputDir}/part-r-00000  (view it: hdfs dfs -cat ${outputDir}/part-r-00000)`);
+    this.finishedJobs.push({ jobId, appId, name: jobName, user: 'Hacker', queue: 'default', state: 'SUCCEEDED', startTime, finishTime: Date.now(), output: outputDir || '' });
+    if (this.finishedJobs.length > 200) this.finishedJobs.shift();
+    return lines.join('\n');
+  }
+
+  private writeJobOutput(outputDir: string, content: string): void {
+    const rep = this.confInt('dfs.replication', 3);
+    const bs = this.confInt('dfs.blocksize', 134217728);
+    this.nameNode.getNamespace().mkdir(outputDir, true);
+    this.db.saveHdfsFileContent(outputDir, '__HADOOP_DIR__');
+    this.nameNode.createAndWriteFile(`${outputDir}/_SUCCESS`, '', rep, bs);
+    this.db.saveHdfsFileContent(`${outputDir}/_SUCCESS`, '');
+    this.nameNode.createAndWriteFile(`${outputDir}/part-r-00000`, content, rep, bs);
+    this.db.saveHdfsFileContent(`${outputDir}/part-r-00000`, content);
+    this.scheduleMetaSave();
+  }
+
+  private checkOutputDir(outArg: string | undefined): string | { dir: string } {
+    if (!outArg) return 'Usage: output directory missing';
+    const dir = normalizeHdfsPath(outArg);
+    if (this.nameNode.getNamespace().resolvePath(dir)) {
+      return `Exception in thread "main" org.apache.hadoop.mapred.FileAlreadyExistsException: Output directory hdfs://localhost:9000${dir} already exists
+Hint: remove it first with  hdfs dfs -rm -r ${dir}   or use a new output directory.`;
+    }
+    return { dir };
+  }
+
+  /** hadoop jar / yarn jar */
+  private runJar(args: string[], raw: string): string {
+    if (args.length === 0) return 'RunJar jarFile [mainClass] args...';
+    if (!this.isHDFSStarted) return `java.net.ConnectException: Call From localhost/127.0.0.1 to localhost:9000 failed on connection exception: Connection refused\nRun 'start-dfs.sh' first.`;
+    if (this.safeModeManual) return 'org.apache.hadoop.hdfs.server.namenode.SafeModeException: Name node is in safe mode.';
+    const jar = args[0];
+    if (/streaming/i.test(jar)) return this.runStreaming(raw);
+    let rest = args.slice(1);
+    if (rest[0] && /^org\.apache\.hadoop\.examples\./.test(rest[0])) rest = [rest[0].split('.').pop()!.toLowerCase(), ...rest.slice(1)];
+    let program = (rest[0] || '').toLowerCase();
+    if (!/examples/i.test(jar) && /wordcount/i.test(program)) program = 'wordcount';
+    if (program === 'quasimontecarlo') program = 'pi';
+    const progArgs = rest.slice(1);
+    const usage = `An example program must be given as the first argument.
+Valid program names are:
+  grep: A map/reduce program that counts the matches of a regex in the input.
+  pi: A map/reduce program that estimates Pi using a quasi-Monte Carlo method.
+  sort: A map/reduce program that sorts the data written by the random writer.
+  wordcount: A map/reduce program that counts the words in the input files.
+  wordmean: A map/reduce program that counts the average length of the words in the input files.`;
+    if (!program) return usage;
+    switch (program) {
+      case 'wordcount':
+      case 'wordmean':
+      case 'sort': {
+        if (progArgs.length < 2) return `Usage: ${program} <in> [<in>...] <out>`;
+        const out = this.checkOutputDir(progArgs[progArgs.length - 1]);
+        if (typeof out === 'string') return out;
+        const input = this.readJobInput(progArgs.slice(0, -1));
+        if (typeof input === 'string') return input;
+        const result = program === 'wordcount' ? wordCount(input.texts) : program === 'wordmean' ? wordMean(input.texts) : sortLines(input.texts);
+        this.writeJobOutput(out.dir, result.output);
+        return this.jobLog(program === 'wordcount' ? 'word count' : program, input.paths.length, result, out.dir);
+      }
+      case 'grep': {
+        if (progArgs.length < 3) return 'Grep <inDir> <outDir> <regex> [<group>]';
+        const out = this.checkOutputDir(progArgs[1]);
+        if (typeof out === 'string') return out;
+        const input = this.readJobInput([progArgs[0]]);
+        if (typeof input === 'string') return input;
+        try {
+          const result = grepJob(input.texts, progArgs[2], parseInt(progArgs[3] || '0', 10) || 0);
+          this.writeJobOutput(out.dir, result.output);
+          return this.jobLog('grep-sort', input.paths.length, result, out.dir);
+        } catch (err: any) {
+          return `Exception in thread "main" ${err.message}`;
+        }
+      }
+      case 'pi': {
+        const maps = parseInt(progArgs[0], 10);
+        const samples = parseInt(progArgs[1], 10);
+        if (!(maps > 0) || !(samples > 0)) return 'Usage: org.apache.hadoop.examples.QuasiMonteCarlo <nMaps> <nSamples>';
+        if (maps * samples > 50000000) return 'This simulator caps pi at 50,000,000 total samples so your browser stays responsive.';
+        const result = piEstimate(maps, samples);
+        const wrote = Array.from({ length: Math.min(maps, 20) }, (_, i) => `Wrote input for Map #${i}`).join('\n');
+        return `Number of Maps  = ${maps}\nSamples per Map = ${samples}\n${wrote}\nStarting Job\n${this.jobLog('QuasiMonteCarlo', maps, result, null)}`;
+      }
+      default:
+        if (/examples/i.test(jar)) return `Unknown program '${rest[0]}' chosen.\n${usage}`;
+        return `Exception in thread "main" java.lang.ClassNotFoundException: ${rest[0] || jar}
+This simulator cannot run compiled Java classes. Use the examples jar
+  (hadoop jar hadoop-mapreduce-examples.jar wordcount <in> <out>)
+or Hadoop Streaming with Python:
+  hadoop jar hadoop-streaming.jar -input <in> -output <out> -mapper "python3 mapper.py" -reducer "python3 reducer.py"`;
+    }
+  }
+
+  /** Hadoop Streaming with Python (or cat / wc / sort / uniq) mappers and reducers. */
+  private runStreaming(raw: string): string {
+    const tokens = (raw.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((t) => t.replace(/^["']|["']$/g, ''));
+    const opt = (name: string) => {
+      const vals: string[] = [];
+      tokens.forEach((t, i) => {
+        if (t === name && tokens[i + 1] !== undefined) vals.push(tokens[i + 1]);
+      });
+      return vals;
+    };
+    const inputs = opt('-input');
+    const outArg = opt('-output')[0];
+    const mapper = opt('-mapper')[0] || 'cat';
+    const reducer = opt('-reducer')[0];
+    if (!inputs.length || !outArg) return 'Usage: hadoop jar hadoop-streaming.jar -input <in> -output <out> -mapper <cmd> [-reducer <cmd>] [-file <f>]';
+    const out = this.checkOutputDir(outArg);
+    if (typeof out === 'string') return out;
+    const input = this.readJobInput(inputs);
+    if (typeof input === 'string') return input;
+    const runStage = (command: string, stdin: string): { out: string } | { err: string } => {
+      const parts = command.trim().split(/\s+/);
+      const exe = parts[0];
+      if (exe === 'cat' || exe === '/bin/cat') return { out: stdin };
+      if (exe === 'wc' || exe === '/usr/bin/wc') {
+        const lines = stdin.split('\n').length - (stdin.endsWith('\n') ? 1 : 0);
+        const words = stdin.split(/\s+/).filter(Boolean).length;
+        if (parts.includes('-l')) return { out: `${lines}\n` };
+        if (parts.includes('-w')) return { out: `${words}\n` };
+        return { out: `${lines} ${words} ${new TextEncoder().encode(stdin).length}\n` };
+      }
+      if (exe === 'sort') return { out: streamingShuffle(stdin) };
+      if (exe === 'uniq') {
+        const ls = stdin.split('\n').filter((l) => l !== '');
+        const res = ls.filter((l, i) => i === 0 || l !== ls[i - 1]);
+        return { out: res.join('\n') + (res.length ? '\n' : '') };
+      }
+      let script = exe;
+      let scriptArgs = parts.slice(1);
+      if (/^python3?$/.test(exe)) {
+        script = parts[1];
+        scriptArgs = parts.slice(2);
+      }
+      const code = this.getLocalFileContent(script);
+      if (code === undefined) return { err: `Cannot run program "${command}": error=2, No such file or directory (create ${script} with vim first)` };
+      const res = this.pythonEngine.runWithStdin(code, stdin, [script, ...scriptArgs], this.localFiles);
+      if (!res) return { err: 'Python is still loading. Wait a few seconds and run the job again.' };
+      if (res.exitCode !== 0) return { err: `PipeMapRed.waitOutputThreads(): subprocess failed with code 1\n${res.stderr}` };
+      return { out: res.stdout };
+    };
+    const mapRes = runStage(mapper, input.texts.join(''));
+    if ('err' in mapRes) return `ERROR streaming.StreamJob: Job not successful!\n${mapRes.err}`;
+    const shuffled = streamingShuffle(mapRes.out);
+    let finalOut = shuffled;
+    if (reducer && reducer !== 'NONE') {
+      const redRes = runStage(reducer, shuffled);
+      if ('err' in redRes) return `ERROR streaming.StreamJob: Job not successful!\n${redRes.err}`;
+      finalOut = redRes.out;
+    }
+    this.writeJobOutput(out.dir, finalOut);
+    const allInput = input.texts.join('');
+    const result: JobResult = {
+      output: finalOut,
+      counters: {
+        mapInputRecords: allInput.split('\n').filter((l) => l !== '').length,
+        mapOutputRecords: mapRes.out.split('\n').filter(Boolean).length,
+        reduceInputGroups: new Set(shuffled.split('\n').filter(Boolean).map((l) => l.split('\t')[0])).size,
+        reduceOutputRecords: finalOut.split('\n').filter(Boolean).length,
+        bytesRead: new TextEncoder().encode(allInput).length,
+        bytesWritten: new TextEncoder().encode(finalOut).length
+      }
+    };
+    return `packageJobJar: [] [/home/Hacker/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar] /tmp/streamjob.jar tmpDir=null\n${this.jobLog('streamjob', input.paths.length, result, out.dir)}\nINFO streaming.StreamJob: Output directory: ${out.dir}`;
+  }
+
+  private mapredCommand(cmd: ParsedCommand): string {
+    if (cmd.subcommand === 'job') {
+      const action = cmd.action || '';
+      if (action === '-list') {
+        const all = cmd.positionalArgs[0] === 'all';
+        const jobs = all ? this.finishedJobs : [];
+        const lines = [`Total jobs:${jobs.length}`, `                  JobId\t     JobName\t     State\t     StartTime\t    UserName\t       Queue\t    Priority`];
+        jobs.forEach((j) => lines.push(` ${j.jobId}\t  ${j.name}\t ${j.state}\t${j.startTime}\t${j.user}\t${j.queue}\tDEFAULT`));
+        if (!all && this.finishedJobs.length) lines.push(`(${this.finishedJobs.length} finished job(s) hidden; use: mapred job -list all)`);
+        return lines.join('\n');
+      }
+      if (action === '-status') {
+        const j = this.finishedJobs.find((x) => x.jobId === cmd.positionalArgs[0]);
+        if (!j) return `Could not find job ${cmd.positionalArgs[0] || ''}`;
+        return `Job: ${j.jobId}\nJob File: hdfs://localhost:9000/tmp/hadoop-yarn/staging/Hacker/.staging/${j.jobId}/job.xml\nJob Tracking URL : http://localhost:19888/jobhistory/job/${j.jobId}\nUber job : false\nNumber of maps: 1\nNumber of reduces: 1\nmap() completion: 1.0\nreduce() completion: 1.0\nJob state: ${j.state}\nretired: false\nreason for failure: \nOutput: ${j.output}`;
+      }
+      if (action === '-kill') return `Could not find job ${cmd.positionalArgs[0] || ''} (it has already finished)`;
+      return 'Usage: mapred job [-list [all]] [-status <job-id>] [-kill <job-id>]';
+    }
+    if (cmd.subcommand === 'version') return this.hadoopVersionText();
+    return `Usage: mapred [--config confdir] COMMAND
+  job          manipulate MapReduce jobs (mapred job -list all, mapred job -status <id>)
+  version      print the version
+  --daemon start historyserver   start the JobHistory server`;
+  }
+
+  /** hdfs/yarn/mapred --daemon start|stop <name>, hadoop-daemon.sh, mr-jobhistory-daemon.sh */
+  private runDaemonCommand(op: string, name: string): string {
+    const daemon = (name || '').toLowerCase();
+    const start = op === 'start';
+    if (op === 'status') {
+      const up = ['namenode', 'datanode', 'secondarynamenode'].includes(daemon) ? this.isHDFSStarted
+        : ['resourcemanager', 'nodemanager'].includes(daemon) ? this.isYARNStarted
+        : daemon === 'historyserver' ? this.historyServerRunning : false;
+      return up ? `${daemon} is running as process ${18000 + daemon.length * 37}.` : `${daemon} is not running.`;
+    }
+    if (op !== 'start' && op !== 'stop') return 'Usage: --daemon (start|status|stop) <daemon>';
+    if (['namenode', 'datanode', 'secondarynamenode'].includes(daemon)) {
+      if (start && !this.isNameNodeFormatted) return `Error: NameNode is not formatted! Please run 'hdfs namenode -format' first.`;
+      this.isHDFSStarted = start;
+      this.persistShellState();
+      return `✓ ${start ? 'Started' : 'Stopped'} ${daemon} (HDFS daemons are started/stopped together in this simulator).`;
+    }
+    if (['resourcemanager', 'nodemanager'].includes(daemon)) {
+      this.isYARNStarted = start;
+      this.persistShellState();
+      return `✓ ${start ? 'Started' : 'Stopped'} ${daemon} (YARN daemons are started/stopped together in this simulator).`;
+    }
+    if (daemon === 'historyserver') {
+      this.historyServerRunning = start;
+      return start
+        ? 'starting historyserver, logging to /home/Hacker/hadoop/logs/mapred-Hacker-historyserver-localhost.out\n✓ JobHistoryServer started (web UI port 19888).'
+        : 'stopping historyserver\n✓ JobHistoryServer stopped.';
+    }
+    return `ERROR: Cannot find daemon '${name}'. Known: namenode, datanode, secondarynamenode, resourcemanager, nodemanager, historyserver`;
   }
 
   private executeHadoopCommand(cmd: ParsedCommand): string {
@@ -1926,7 +2739,23 @@ Replication Queues: Empty`);
 ✓ Inter-cluster dataset replication completed successfully.`;
     }
 
+    if (cmd.subcommand === 'version') {
+      return this.hadoopVersionText();
+    }
+
     if (cmd.subcommand === 'jar') {
+      return this.runJar([...cmd.positionalArgs], cmd.raw);
+    }
+
+    if (cmd.subcommand === 'classpath') {
+      return '/home/Hacker/hadoop/etc/hadoop:/home/Hacker/hadoop/share/hadoop/common/lib/*:/home/Hacker/hadoop/share/hadoop/common/*:/home/Hacker/hadoop/share/hadoop/hdfs/*:/home/Hacker/hadoop/share/hadoop/mapreduce/*:/home/Hacker/hadoop/share/hadoop/yarn/*';
+    }
+
+    if (cmd.subcommand === 'checknative') {
+      return 'Native library checking:\nhadoop:  false\nzlib:    false\nzstd  :  false\nsnappy:  false\nlz4:     false\nbzip2:   false\nopenssl: false\n(Browser simulator: native libraries are not used.)';
+    }
+
+    if (cmd.subcommand === '__legacy_jar__') {
       if (cmd.positionalArgs.length < 3) {
         return `Usage: hadoop jar <jarfile> [mainclass] <input> <output>`;
       }
@@ -1956,7 +2785,13 @@ Replication Queues: Empty`);
       }
     }
 
-    return `Hadoop CLI commands:\n  hadoop jar <jarfile> <input> <output>\n  hadoop distcp <src> <dst>`;
+    return `Usage: hadoop [OPTIONS] SUBCOMMAND [SUBCOMMAND OPTIONS]
+  fs / dfs     run a generic filesystem user client (same as hdfs dfs)
+  jar <jar>    run a jar file (hadoop-mapreduce-examples.jar wordcount|grep|pi|wordmean|sort, hadoop-streaming.jar)
+  distcp       copy file or directories recursively
+  version      print the version
+  classpath    prints the class path needed to get the Hadoop jar
+  checknative  check native Hadoop and compression libraries availability`;
   }
 
   private executeYARNCommand(cmd: ParsedCommand): string {
@@ -1999,15 +2834,19 @@ appattempt_1700000000_0001_000001  FINISHED   container_e01_1700000000_0001_01_0
       }
 
       if (cmd.action === '-list') {
-        const jobs = this.mapReduceEngine.getJobs();
+        // Like YARN: without -appStates only SUBMITTED/ACCEPTED/RUNNING apps are listed.
+        const statesArg = (cmd.positionalArgs.find((a) => /^[A-Z_,]+$/.test(a)) || '').toUpperCase();
+        const wantAll = statesArg.includes('ALL') || statesArg.includes('FINISHED');
+        const apps = wantAll ? this.finishedJobs : [];
+        const states = wantAll ? (statesArg.includes('ALL') ? '[NEW, NEW_SAVING, SUBMITTED, ACCEPTED, RUNNING, FINISHED, FAILED, KILLED]' : '[FINISHED]') : '[SUBMITTED, ACCEPTED, RUNNING]';
         const lines = [
-          `Total Applications: ${jobs.length}`,
-          `ID                       Name            Type       User     Queue      State`,
-          `----------------------------------------------------------------------------------`
+          `Total number of applications (application-types: [], states: ${states} and tags: []):${apps.length}`,
+          `                Application-Id\t    Application-Name\t    Application-Type\t      User\t     Queue\t             State\t       Final-State\t       Progress\t                       Tracking-URL`
         ];
-        jobs.forEach((j) => {
-          lines.push(`${j.id.padEnd(24)} ${j.name.padEnd(15)} MAPREDUCE  ${j.user.padEnd(8)} ${j.queue.padEnd(10)} ${j.state}`);
+        apps.forEach((j) => {
+          lines.push(`${j.appId}\t          ${j.name}\t           MAPREDUCE\t    ${j.user}\t   ${j.queue}\t          FINISHED\t         ${j.state}\t           100%\thttp://localhost:19888/jobhistory/job/${j.jobId}`);
         });
+        if (!wantAll && this.finishedJobs.length) lines.push(`(${this.finishedJobs.length} finished application(s) hidden; use: yarn application -list -appStates ALL)`);
         return lines.join('\n');
       }
     }
@@ -2073,6 +2912,7 @@ LogType: stderr
 
   private resolveLocalPath(pathStr: string): string {
     if (!pathStr || pathStr === '~') return '/home/Hacker';
+    if (pathStr.startsWith('~/')) pathStr = '/home/Hacker/' + pathStr.slice(2);
 
     const raw = pathStr.startsWith('/') ? pathStr : `${this.localDir}/${pathStr}`;
     const parts = raw.split('/').filter(Boolean);
@@ -2090,13 +2930,18 @@ LogType: stderr
     return '/' + stack.join('/');
   }
 
-  private executePython(code: string, inputs: string[]): string {
+  /** Load the Python runtime before running a script (the UI awaits this). */
+  public async preparePython(): Promise<void> {
+    await this.pythonEngine.initPyodide();
+  }
+
+  private executePython(code: string, inputs: string[], scriptName: string = '<string>'): string {
     const onSaveFile = (filePath: string, content: string) => {
       this.saveLocalFileContent(filePath, content);
     };
 
     if (this.pythonEngine) {
-      const pyodideRes = this.pythonEngine.runSync(code, inputs, this.localFiles, onSaveFile);
+      const pyodideRes = this.pythonEngine.runSync(code, inputs, this.localFiles, onSaveFile, scriptName, [scriptName, ...inputs]);
       if (pyodideRes) {
         return pyodideRes.stderr ? `${pyodideRes.stdout}\n${pyodideRes.stderr}`.trim() : pyodideRes.stdout;
       }
