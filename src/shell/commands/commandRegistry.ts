@@ -11,7 +11,7 @@ const ABOUT_GUIDE_CONTENT = `===================================================
            BROWSER-BASED HADOOP SIMULATOR & PRACTICE LABORATORY GUIDE
 ================================================================================
 DEVELOPER     : Niranjan Kumar K
-DEPLOYMENT URL: https://hacker1514.github.io/hadoop/
+DEPLOYMENT URL: https://kni1514.github.io/hadoop/
 ENVIRONMENT   : Apache Hadoop, PySpark v3.3.0, KSQL SQLite WASM, HDFS & YARN Engine
 
 --------------------------------------------------------------------------------

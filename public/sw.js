@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hadoop-offline-v6';
+const CACHE_NAME = 'hadoop-offline-v7';
 const APP_SHELL = './index.html';
 
 const STATIC_ASSETS = [

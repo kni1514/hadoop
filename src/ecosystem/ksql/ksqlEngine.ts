@@ -321,14 +321,11 @@ export class KSQLEngine {
 5.load => load CSV file into table (e.g. load 'sales.csv' into sales or sales = load 'sales.csv')
 6.add => to add data from an existing .db file
 7.tables => to show all tables
-8.contact => talk with developer
-9.request => to adding new commands
-10.feedback => to providing feedback to developer 
-11.ask => ask your doubts
-12.edit => to create a sql file
-13.run => to run the sql file 
-14.help => to see all commands
-15.pig help => Apache Pig Latin commands (DUMP, DESCRIBE, FILTER, FOREACH, GROUP,
+8.ask => ask your doubts (answered offline)
+9.edit => to create a sql file
+10.run => to run the sql file 
+11.help => to see all commands
+12.pig help => Apache Pig Latin commands (DUMP, DESCRIBE, FILTER, FOREACH, GROUP,
    ORDER, LIMIT, DISTINCT, JOIN, UNION, CROSS, SAMPLE, SPLIT, ILLUSTRATE, EXPLAIN, ALIASES)
 
 ${PIG_HELP}`,
@@ -396,11 +393,6 @@ ${PIG_HELP}`,
 
       // Answered locally - this shell never sends requests outside the app.
       return { output: offlineAnswer(userPrompt), isError: false };
-    }
-
-    if (lowerQuery === 'contact' || lowerQuery === 'request' || lowerQuery === 'feedback') {
-      window.open('https://hacker1514.github.io/python/contact.html', '_blank');
-      return { output: 'Opening developer portal...', isError: false };
     }
 
     if (!this.db) return { output: 'Database not initialized.', isError: true };

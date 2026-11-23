@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <b>Architected & Engineered by <a href="https://github.com/hacker1514">Niranjan Kumar K</a></b><br/>
-  Deployment URL: <a href="https://hacker1514.github.io/hadoop/">https://hacker1514.github.io/hadoop/</a><br/>
-  GitHub Username: <code>hacker1514</code> | Repository: <code>hacker1514/hadoop</code>
+  <b>Architected & Engineered by <a href="https://github.com/kni1514">Niranjan Kumar K</a></b><br/>
+  Deployment URL: <a href="https://kni1514.github.io/hadoop/">https://kni1514.github.io/hadoop/</a><br/>
+  GitHub Username: <code>kni1514</code> | Repository: <code>kni1514/hadoop</code>
 </p>
 
 <p align="center">
@@ -96,7 +96,7 @@ about                    # View system architecture guide
 
 ## 📱 Offline PWA App Installation
 
-1. Open **[https://hacker1514.github.io/hadoop/](https://hacker1514.github.io/hadoop/)** in Chrome / Edge / Brave.
+1. Open **[https://kni1514.github.io/hadoop/](https://kni1514.github.io/hadoop/)** in Chrome / Edge / Brave.
 2. Click the **Install Hadoop App** floating banner at the bottom left (or (+) icon in browser address bar).
 3. The app will install onto your desktop or mobile home screen, running 100% offline via Chrome CacheStorage.
 
@@ -104,7 +104,7 @@ about                    # View system architecture guide
 
 ## 👤 Author & License
 
-- **Developer**: [Niranjan Kumar K](https://github.com/hacker1514)
-- **Deployment URL**: [https://hacker1514.github.io/hadoop/](https://hacker1514.github.io/hadoop/)
-- **GitHub Repository**: [`hacker1514/hadoop`](https://github.com/hacker1514/hadoop)
+- **Developer**: [Niranjan Kumar K](https://github.com/kni1514)
+- **Deployment URL**: [https://kni1514.github.io/hadoop/](https://kni1514.github.io/hadoop/)
+- **GitHub Repository**: [`kni1514/hadoop`](https://github.com/kni1514/hadoop)
 - **License**: MIT License.

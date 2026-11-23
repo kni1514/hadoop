@@ -4,41 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Apache Hadoop Enterprise Studio | Niranjan Kumar K</title>
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- FontAwesome 6 Icons -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
-  <!-- Google Fonts: Plus Jakarta Sans, Outfit & JetBrains Mono -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['Plus Jakarta Sans', 'sans-serif'],
-            display: ['Outfit', 'sans-serif'],
-            mono: ['JetBrains Mono', 'monospace'],
-          },
-          colors: {
-            smooth: {
-              bg: '#FAF9F6',
-              card: '#FFFFFF',
-              border: 'rgba(226, 232, 240, 0.8)',
-              dark: '#0B0F19',
-              amber: '#F59E0B',
-              blue: '#3B82F6',
-              emerald: '#10B981',
-              purple: '#8B5CF6'
-            }
-          }
-        }
-      }
-    }
-  </script>
+  <!-- Styles are generated locally (no CDN): Tailwind -> landing.css, icons are inline SVG (Lucide) -->
+  <link rel="stylesheet" href="./landing.css" />
   <style>
+    .lc-icon { width: 1em; height: 1em; display: inline-block; vertical-align: -0.125em; flex-shrink: 0; }
     body {
       background-color: #FAF9F5;
       color: #0F172A;
@@ -126,13 +95,13 @@
 
       <!-- CTA BUTTONS -->
       <div class="flex items-center space-x-3.5">
-        <a href="https://github.com/hacker1514/hadoop" target="_blank" class="px-4 py-2.5 rounded-2xl bg-white hover:bg-slate-50 text-slate-800 text-sm font-semibold border border-slate-200/90 shadow-sm transition-all hover:border-slate-300 flex items-center gap-2">
-          <i class="fa-brands fa-github text-lg text-amber-500"></i>
-          <span>hacker1514/hadoop</span>
+        <a href="https://github.com/kni1514/hadoop" target="_blank" class="px-4 py-2.5 rounded-2xl bg-white hover:bg-slate-50 text-slate-800 text-sm font-semibold border border-slate-200/90 shadow-sm transition-all hover:border-slate-300 flex items-center gap-2">
+          <svg class="lc-icon text-lg text-amber-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+          <span>kni1514/hadoop</span>
         </a>
-        <a href="#console" onclick="window.open('https://hacker1514.github.io/hadoop/','_self')" class="px-6 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-display font-extrabold text-sm shadow-xl shadow-slate-900/10 transition-all transform hover:scale-105 flex items-center gap-2">
+        <a href="#console" onclick="window.location.href='../'" class="px-6 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-display font-extrabold text-sm shadow-xl shadow-slate-900/10 transition-all transform hover:scale-105 flex items-center gap-2">
           <span>Launch Terminal</span>
-          <i class="fa-solid fa-terminal text-xs text-amber-400"></i>
+          <svg class="lc-icon text-xs text-amber-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
         </a>
       </div>
     </div>
@@ -159,11 +128,11 @@
           </p>
 
           <div class="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4 pt-2">
-            <a href="#console" onclick="window.open('https://hacker1514.github.io/hadoop/','_self')" class="w-full sm:w-auto px-8 py-4 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-display font-extrabold text-base shadow-2xl shadow-slate-900/20 transition-all transform hover:-translate-y-1 flex items-center justify-center gap-3">
-              <i class="fa-solid fa-play text-xs text-amber-400"></i> Launch Practice Terminal
+            <a href="#console" onclick="window.location.href='../'" class="w-full sm:w-auto px-8 py-4 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-display font-extrabold text-base shadow-2xl shadow-slate-900/20 transition-all transform hover:-translate-y-1 flex items-center justify-center gap-3">
+              <svg class="lc-icon text-xs text-amber-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg> Launch Practice Terminal
             </a>
-            <a href="https://github.com/hacker1514/hadoop" target="_blank" class="w-full sm:w-auto px-8 py-4 rounded-2xl bg-white hover:bg-slate-50 text-slate-800 font-bold text-base transition-all border border-slate-200/90 shadow-sm flex items-center justify-center gap-3">
-              <i class="fa-brands fa-github text-lg text-slate-700"></i> View GitHub Repository
+            <a href="https://github.com/kni1514/hadoop" target="_blank" class="w-full sm:w-auto px-8 py-4 rounded-2xl bg-white hover:bg-slate-50 text-slate-800 font-bold text-base transition-all border border-slate-200/90 shadow-sm flex items-center justify-center gap-3">
+              <svg class="lc-icon text-lg text-slate-700" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg> View GitHub Repository
             </a>
           </div>
 
@@ -222,7 +191,7 @@
         <div class="smooth-card p-7 space-y-4 border-t-4 border-t-amber-500">
           <div class="flex items-center justify-between">
             <span class="text-xs font-mono font-bold px-3 py-1 rounded-full bg-amber-500/10 text-amber-700 border border-amber-300/60">Active NameNode</span>
-            <i class="fa-solid fa-server text-2xl text-amber-500"></i>
+            <svg class="lc-icon text-2xl text-amber-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">Metadata & FSCK Controller</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Manages HDFS namespace, block location mapping, and HA failover states between Active (`nn1`) and Standby (`nn2`) NameNodes.</p>
@@ -237,7 +206,7 @@
         <div class="smooth-card p-7 space-y-4 border-t-4 border-t-blue-500">
           <div class="flex items-center justify-between">
             <span class="text-xs font-mono font-bold px-3 py-1 rounded-full bg-blue-500/10 text-blue-700 border border-blue-300/60">ResourceManager</span>
-            <i class="fa-solid fa-microchip text-2xl text-blue-500"></i>
+            <svg class="lc-icon text-2xl text-blue-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">YARN Capacity Scheduler</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Orchestrates application containers, vCore allocations, and memory queues across NodeManagers.</p>
@@ -252,7 +221,7 @@
         <div class="smooth-card p-7 space-y-4 border-t-4 border-t-emerald-500">
           <div class="flex items-center justify-between">
             <span class="text-xs font-mono font-bold px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-300/60">DataNode Cluster</span>
-            <i class="fa-solid fa-network-wired text-2xl text-emerald-500"></i>
+            <svg class="lc-icon text-2xl text-emerald-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">Rack-Aware Storage</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Stores 128MB block splits across multiple racks (`/rack-01`, `/rack-02`) with automated DataNode block reports.</p>
@@ -337,90 +306,90 @@
         <!-- CARD 1 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-600 flex items-center justify-center text-xl font-bold border border-amber-300/40">
-            <i class="fa-solid fa-database"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">HDFS Storage & Tiering</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Rack-aware block distribution (128MB splits), FSCK diagnostics, block locations, and storage policies.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-amber-600"></i> Storage Policies (HOT, WARM, COLD)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-amber-600"></i> Erasure Coding (RS-6-3-1024k)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-amber-600"></i> Off-Heap Cache (cacheadmin)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-amber-600"></i> Snapshots & HDFS Balancer</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-amber-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Storage Policies (HOT, WARM, COLD)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-amber-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Erasure Coding (RS-6-3-1024k)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-amber-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Off-Heap Cache (cacheadmin)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-amber-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Snapshots & HDFS Balancer</li>
           </ul>
         </div>
 
         <!-- CARD 2 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-600 flex items-center justify-center text-xl font-bold border border-blue-300/40">
-            <i class="fa-solid fa-microchip"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">YARN & MapReduce</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Resource allocations, Capacity Scheduler queues, Container logs, NodeManager status, and Apache Tez DAG engine.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-blue-600"></i> MapReduce Jar Runner (hadoop jar)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-blue-600"></i> Apache Tez Memory DAG (tez-job.sh)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-blue-600"></i> YARN Container Logs (yarn logs)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-blue-600"></i> Shared Cache Manager (yarn scm)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-blue-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> MapReduce Jar Runner (hadoop jar)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-blue-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Apache Tez Memory DAG (tez-job.sh)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-blue-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> YARN Container Logs (yarn logs)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-blue-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Shared Cache Manager (yarn scm)</li>
           </ul>
         </div>
 
         <!-- CARD 3 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-purple-500/10 text-purple-600 flex items-center justify-center text-xl font-bold border border-purple-300/40">
-            <i class="fa-brands fa-node-js"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">Node.js Polyglot Engine</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Real JavaScript Function execution engine. Write JS scripts in Vim and run MapReduce via Hadoop Streaming.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-purple-600"></i> Node.js Runtime Engine (v18.16)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-purple-600"></i> Real JS Console Execution (node script.js)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-purple-600"></i> Inline Evaluation (node -e)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-purple-600"></i> Hadoop Streaming (hadoop-streaming.jar)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-purple-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Node.js Runtime Engine (v18.16)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-purple-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Real JS Console Execution (node script.js)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-purple-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Inline Evaluation (node -e)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-purple-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Hadoop Streaming (hadoop-streaming.jar)</li>
           </ul>
         </div>
 
         <!-- CARD 4 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center text-xl font-bold border border-emerald-300/40">
-            <i class="fa-solid fa-table"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">Hive, Impala & Spark</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Metastore table parsing, DDL schema evolution, LLAP memory caches, Spark RDDs, and interactive REPLs.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-600"></i> Hive SQL Metastore & LLAP Accelerator</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-600"></i> Spark Scala Shell (spark-shell)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-600"></i> PySpark Python Shell (pyspark)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-600"></i> Impala & Presto Low-Latency MPP SQL</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-emerald-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Hive SQL Metastore & LLAP Accelerator</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-emerald-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Spark Scala Shell (spark-shell)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-emerald-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> PySpark Python Shell (pyspark)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-emerald-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Impala & Presto Low-Latency MPP SQL</li>
           </ul>
         </div>
 
         <!-- CARD 5 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-rose-500/10 text-rose-600 flex items-center justify-center text-xl font-bold border border-rose-300/40">
-            <i class="fa-solid fa-cubes"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">HBase, Kafka & Flume</h3>
           <p class="text-xs text-slate-600 leading-relaxed">NoSQL column-family storage shell, Phoenix SQL skin, Kafka topic partitioning, and Flume event ingestion.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-rose-600"></i> HBase Shell (create, put, get, scan)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-rose-600"></i> Apache Phoenix JDBC SQL (phoenix-sqlline)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-rose-600"></i> Apache Kafka Clusters (kafka-topics.sh)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-rose-600"></i> Apache Flume HDFS Ingestion (flume-ng)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-rose-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> HBase Shell (create, put, get, scan)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-rose-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Apache Phoenix JDBC SQL (phoenix-sqlline)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-rose-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Apache Kafka Clusters (kafka-topics.sh)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-rose-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Apache Flume HDFS Ingestion (flume-ng)</li>
           </ul>
         </div>
 
         <!-- CARD 6 -->
         <div class="smooth-card p-7 space-y-4">
           <div class="w-12 h-12 rounded-2xl bg-cyan-500/10 text-cyan-600 flex items-center justify-center text-xl font-bold border border-cyan-300/40">
-            <i class="fa-solid fa-shield-halved"></i>
+            <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 22V2"/></svg>
           </div>
           <h3 class="text-xl font-bold text-slate-900">Security & Linux Tools</h3>
           <p class="text-xs text-slate-600 leading-relaxed">Kerberos ticket authentication, Apache Ranger policy enforcement, Vim editor, and Linux system monitoring.</p>
           <ul class="text-xs font-mono text-slate-700 space-y-2 pt-2 border-t border-slate-200/80">
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-cyan-600"></i> Kerberos Auth (kinit, klist, kdestroy)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-cyan-600"></i> Apache Ranger Security (ranger policy)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-cyan-600"></i> Interactive Vim Editor (vim about.txt)</li>
-            <li class="flex items-center gap-2"><i class="fa-solid fa-check text-cyan-600"></i> Process Monitor (top, ps -ef, kill)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-cyan-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Kerberos Auth (kinit, klist, kdestroy)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-cyan-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Apache Ranger Security (ranger policy)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-cyan-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Interactive Vim Editor (vim about.txt)</li>
+            <li class="flex items-center gap-2"><svg class="lc-icon text-cyan-600" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Process Monitor (top, ps -ef, kill)</li>
           </ul>
         </div>
 
@@ -481,8 +450,8 @@
         <p class="text-slate-400 text-sm">Every command implemented across HDFS, YARN, Hive, HBase, Spark, Polyglot JS, Tez, and Security is documented in <code>~/about.txt</code>.</p>
       </div>
       <div>
-        <a href="#console" onclick="window.open('https://hacker1514.github.io/hadoop/','_self')" class="px-8 py-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-extrabold text-base shadow-xl transition-all transform hover:scale-105 flex items-center gap-3">
-          <i class="fa-solid fa-terminal"></i> Launch Simulator Now
+        <a href="#console" onclick="window.location.href='../'" class="px-8 py-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-extrabold text-base shadow-xl transition-all transform hover:scale-105 flex items-center gap-3">
+          <svg class="lc-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg> Launch Simulator Now
         </a>
       </div>
     </div>
@@ -502,8 +471,8 @@
       </div>
 
       <div class="flex items-center space-x-6 text-sm text-slate-600 font-mono">
-        <a href="https://github.com/hacker1514/hadoop" target="_blank" class="hover:text-amber-600 transition flex items-center gap-2 font-semibold">
-          <i class="fa-brands fa-github text-amber-500"></i> hacker1514/hadoop
+        <a href="https://github.com/kni1514/hadoop" target="_blank" class="hover:text-amber-600 transition flex items-center gap-2 font-semibold">
+          <svg class="lc-icon text-amber-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg> kni1514/hadoop
         </a>
       </div>
     </div>
